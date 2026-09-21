@@ -1,0 +1,12 @@
+# dsh-cost-balance-indicator bundle patch: mounts the merged cost + balance
+# indicator into a dsh profile composition. Installed by listing this package in
+# the profile's `dsh.profile.bundles` (package.json), or by adding this insert to
+# the profile's own cordis.patch.yml (which takes effect live on profiles with
+# `patchReload: live`).
+#
+# This row replaces BOTH dsh-peak-indicator and dsh-balance-indicator: do not
+# mount them together with this one, because two rows would register the same
+# `peakCost` session projection. install.ps1 retires the old rows for you.
+- insert:
+    - id: cost-balance-indicator
+      name: 'dsh-cost-balance-indicator'

@@ -1,0 +1,40 @@
+# NOTICE
+
+`dsh-cost-balance-indicator` is a merge of two DSH Web plugins. Both are MIT
+licensed; the full license text is in [LICENSE](LICENSE).
+
+## dsh-peak-indicator (upstream)
+
+- Package: `dsh-peak-indicator` 0.1.26
+- Author / copyright: Copyright (c) 2026 Jim <future007s@outlook.com>
+- Source: https://github.com/future007s/dsh-peak-indicator
+- License: MIT (see upstream `LICENSE`, reproduced in this package's LICENSE)
+- What was taken: the `peakCost` session projection and its price tables and
+  peak/off-peak policy, the auto-compaction cost guard and its settings card,
+  the session-header peak badge, and the per-turn token price chip — i.e. most
+  of `lib/index.js` and the corresponding parts of `lib/client.js`.
+- Local modifications carried into this package (they already existed in this
+  profile's installed copy of 0.1.26 before the merge):
+  - the `settingsNamespace` compatibility shim, because
+    `@deepseek-ai/dsh-settings` stopped exporting that helper after 0.1.1-rc.2
+    and the named import aborted the whole plugin tree on core 0.1.5-rc.x;
+  - the official CNY (yuan) price table and yuan labels, replacing the plugin's
+    built-in USD table (DeepSeek official list, 2026-09-10 12:00 Beijing
+    adjustment: flash 2 / 8 / 0.04, pro 9 / 27 / 0.30 CNY per 1M tokens at peak,
+    idle hours exactly half).
+
+## dsh-balance-indicator (this workspace)
+
+- Package: `dsh-balance-indicator` 0.1.0, written for this DSH profile.
+- What was taken: the host-side DeepSeek key balance reader
+  (`GET /api/deepseek.balance` route, credential-store key resolution, cache and
+  stale fallback) and the balance pill plus its shared browser store.
+
+## Notes
+
+- This package is not affiliated with, endorsed by, or published by the
+  upstream author. It is a derivative work that keeps the upstream MIT notice.
+- DeepSeek, the DeepSeek API, and DSH are the property of their respective
+  owners. Price tables are transcribed from DeepSeek's public pricing page and
+  can go stale: check
+  https://api-docs.deepseek.com/zh-cn/quick_start/pricing/ before trusting them.
