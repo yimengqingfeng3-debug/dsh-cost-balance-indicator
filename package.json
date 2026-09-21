@@ -1,6 +1,6 @@
 {
   "name": "dsh-cost-balance-indicator",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "DSH Web 成本与余额指示器：峰谷时段徽标 + 本会话/本轮 token 费用 + DeepSeek Key 余额 + 悬停自定义配色（RGB 轮盘，可整体或单个调色）——合并 dsh-peak-indicator 与 dsh-balance-indicator",
   "type": "module",
   "main": "lib/index.js",

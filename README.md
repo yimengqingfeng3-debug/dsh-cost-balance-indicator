@@ -311,13 +311,13 @@ curl 分不清「路由没挂」和「没登录」。它用凭证库里的 `clie
 ## 打包（已完成，未发布）
 
 ```powershell
-npm run pack        # -> dist/dsh-cost-balance-indicator-0.6.0.tgz
+npm run pack        # -> dist/dsh-cost-balance-indicator-0.6.1.tgz
 ```
 
 发布到 GitHub / npm 的步骤（**本次未执行**，你确认后再跑）：
 
 ```powershell
-git init; git add -A; git commit -m "dsh-cost-balance-indicator 0.6.0"
+git init; git add -A; git commit -m "dsh-cost-balance-indicator 0.6.1"
 gh repo create dsh-cost-balance-indicator --public --source . --push
 npm publish --access public     # 需先 npm login；包名 dsh-cost-balance-indicator 在 npm 上未被占用
 ```
