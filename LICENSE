@@ -1,11 +1,6 @@
 MIT License
 
-Copyright (c) 2026 Jim — the dsh-peak-indicator portions (session cost
-projection, peak/off-peak policy, price tables, header badge, turn price chip,
-auto-compaction card); see NOTICE.
-
-Copyright (c) 2026 dsh-cost-balance-indicator contributors — the merge and the
-DeepSeek key balance feature.
+Copyright (c) 2026 Jim and dsh-cost-balance-indicator contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
