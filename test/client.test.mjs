@@ -887,6 +887,39 @@ test("the save path follows the client's own scope API", async () => {
   }
 });
 
+test("a slot the client no longer has costs only that surface", () => {
+  // The desktop shell and newer bundled cores are the reason: if one slot name is
+  // gone, the remaining pills and the colour store must still register.
+  const exports = loadBundle();
+  const registrations = [];
+  const warnings = [];
+  const scope = fakeScope();
+  exports.apply({
+    effect: (callback) => { callback(); return () => {}; },
+    locale: { register: () => () => {} },
+    modelDirectories: { directoryFor: () => ({ store: { subscribe: () => () => {}, getSnapshot: () => null }, load: () => Promise.resolve() }) },
+    settingsScope: { bind: () => scope },
+    logger: { warn: (message) => warnings.push(message) },
+    slots: {
+      inject: (name, callback) => {
+        if (name === "settings.plugin.item") throw new Error("no such slot");
+        callback();
+      },
+      register: (options, component) => { registrations.push({ options, component }); return () => {}; }
+    }
+  });
+  const ids = registrations.map((item) => item.options.id).sort();
+  assert.deepEqual(ids, [
+    "cost-balance-indicator-balance",
+    "cost-balance-indicator-compaction-general",
+    "cost-balance-indicator-header",
+    "cost-balance-indicator-peak",
+    "cost-balance-indicator-turn"
+  ], "five of the six surfaces survive");
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /settings\.plugin\.item is unavailable/);
+});
+
 test("the colour store adopts a persisted palette from the settings scope", () => {
   const exports = loadBundle();
   const scope = fakeScope({

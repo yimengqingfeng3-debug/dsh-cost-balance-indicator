@@ -257,7 +257,27 @@ if ($bundled) {
   Write-Host '      may leave the chip without its host route until dsh is restarted.'
 }
 
+# 3. Make later patch edits recompose without a restart. The desktop app composes
+#    its reserved profile at launch, so without this every plugin update would need
+#    an app restart. Only the manifest key is touched, and only when it is absent.
+Backup-Once $packageJsonPath
+$manifestText = [System.IO.File]::ReadAllText($packageJsonPath)
+if ($manifestText -notmatch '"patchReload"\s*:\s*"live"') {
+  $manifest = $manifestText | ConvertFrom-Json
+  if ($manifest.dsh -eq $null) { $manifest | Add-Member -NotePropertyName dsh -NotePropertyValue ([pscustomobject]@{}) -Force }
+  if ($manifest.dsh.profile -eq $null) { $manifest.dsh | Add-Member -NotePropertyName profile -NotePropertyValue ([pscustomobject]@{}) -Force }
+  $manifest.dsh.profile | Add-Member -NotePropertyName patchReload -NotePropertyValue 'live' -Force
+  $json = $manifest | ConvertTo-Json -Depth 12
+  [System.IO.File]::WriteAllText($packageJsonPath, $json + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+  Write-Host 'enabled dsh.profile.patchReload = live (later edits recompose without a restart)'
+}
+
 Write-Host ''
 Write-Host 'Done. Header: merged spend+balance pill, then the billing-period pill on its right.'
 Write-Host 'Turn tail: per-turn price chip, then the balance pill on its right.'
 Write-Host 'Reload the browser (Ctrl+Shift+R) to pick up the new bundle.'
+if ($Profile -eq 'desktop') {
+  Write-Host ''
+  Write-Host 'Desktop app: the profile is composed when the app starts, so restart the'
+  Write-Host 'Electron app ONCE to mount the plugin (later updates are live).'
+}

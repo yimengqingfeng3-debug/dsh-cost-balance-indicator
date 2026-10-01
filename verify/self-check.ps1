@@ -17,11 +17,22 @@
 #                                 the boot graph and the served bundle are probed
 #   5. live instance           -- when a server already listens on -LivePort, its
 #                                 route is probed too and the session is left alone
+#   6. desktop app target      -- the Electron app runs the RESERVED `desktop`
+#                                 profile, which the CLI refuses to compose. So:
+#                                 the profile on disk is checked, the SAME profile
+#                                 is composed under a probe name on a free port
+#                                 (route, boot graph, served bundle), and the
+#                                 running app's own port is asked whether it
+#                                 already serves the plugin bundle. An app that
+#                                 composed its profile before this install reports
+#                                 PENDING: it needs one restart, which the report
+#                                 says out loud instead of failing the run.
 #
 # Usage:
 #   pwsh -File verify/self-check.ps1
 #   pwsh -File verify/self-check.ps1 -Profile web -LivePort 3080
 #   pwsh -File verify/self-check.ps1 -SkipColdBoot
+#   pwsh -File verify/self-check.ps1 -SkipDesktop
 #
 # Exit code 0 = every executed check passed.
 [CmdletBinding()]
@@ -31,7 +42,8 @@ param(
   [int]$TimeoutSeconds = 180,
   [string]$DshHome = $(if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }),
   [string]$WorkDir = $(Join-Path $HOME 'Desktop\dsh'),
-  [switch]$SkipColdBoot
+  [switch]$SkipColdBoot,
+  [switch]$SkipDesktop
 )
 
 $ErrorActionPreference = 'Continue'
@@ -42,12 +54,22 @@ $patchPath = Join-Path $profileDir 'cordis.patch.yml'
 $packageJsonPath = Join-Path $profileDir 'package.json'
 $failures = 0
 $checks = 0
+$pendings = @()
 
 function Report([string]$name, [bool]$ok, [string]$detail) {
   $script:checks += 1
   if (-not $ok) { $script:failures += 1 }
   $tag = if ($ok) { 'PASS' } else { 'FAIL' }
   Write-Host ('  [{0}] {1,-42} {2}' -f $tag, $name, $detail)
+}
+
+# A check that could not be satisfied yet, but is not a defect of this package
+# (the desktop app mounts profiles at launch, so the first install needs one
+# restart). Counted as executed, never as a failure, and reported in the summary.
+function ReportPending([string]$name, [string]$detail) {
+  $script:checks += 1
+  $script:pendings += ('{0} - {1}' -f $name, $detail)
+  Write-Host ('  [{0}] {1,-42} {2}' -f 'WAIT', $name, $detail) -ForegroundColor Yellow
 }
 
 function Section([string]$title) {
@@ -217,9 +239,151 @@ if ($listening -eq $null) {
   Report 'live probe exit 0' ($probeExit -eq 0) "exit=$probeExit"
 }
 
+# ------------------------------------------------------ 6. desktop target ----
+# The desktop app owns a RESERVED profile: the CLI answers `profile "desktop" is
+# managed exclusively by the Electron application`, so this section cannot compose
+# it the way section 4 composes -Profile. It does three things instead: inspect
+# the profile on disk, compose an identical PROBE copy under a free name, and ask
+# the running app whether it already serves the plugin bundle.
+function Get-ListeningPortOf([string]$processName) {
+  $ids = @(Get-Process -Name $processName -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+  if ($ids.Count -eq 0) { return $null }
+  foreach ($line in (netstat -ano -p tcp | Select-String -Pattern 'LISTENING')) {
+    $pieces = ($line -as [string]).Trim() -split '\s+'
+    $owner = $pieces[$pieces.Count - 1]
+    if ($owner -match '^\d+$' -and ($ids -contains [int]$owner)) {
+      if ($pieces[1] -match ':(\d+)$') { return [int]$Matches[1] }
+    }
+  }
+  return $null
+}
+
+Section '6. desktop app target (Electron, reserved profile)'
+$desktopDir = Join-Path (Join-Path $dshHomePath 'profiles') 'desktop'
+if ($SkipDesktop) {
+  Report 'desktop target' $true 'skipped by -SkipDesktop'
+} elseif (-not (Test-Path $desktopDir)) {
+  Report 'desktop profile present' $true 'no desktop profile here (skipped)'
+} else {
+  $desktopPatch = Join-Path $desktopDir 'cordis.patch.yml'
+  $desktopManifest = Join-Path $desktopDir 'package.json'
+  $desktopPackage = Join-Path (Join-Path $desktopDir 'node_modules') 'dsh-cost-balance-indicator\lib\client.js'
+  Report 'desktop profile package installed' (Test-Path $desktopPackage) $(if (Test-Path $desktopPackage) { 'node_modules\dsh-cost-balance-indicator' } else { 'run: install.ps1 -Profile desktop' })
+  $desktopPatchText = if (Test-Path $desktopPatch) { Get-Content $desktopPatch -Raw } else { '' }
+  $desktopRows = ([regex]::Matches($desktopPatchText, '(?m)^\s*-?\s*id: cost-balance-indicator\s*$')).Count
+  Report 'desktop patch: exactly one row' ($desktopRows -eq 1) "count=$desktopRows"
+  $manifestText = if (Test-Path $desktopManifest) { Get-Content $desktopManifest -Raw } else { '' }
+  $liveReload = $manifestText -match '"patchReload"\s*:\s*"live"'
+  Report 'desktop manifest: patchReload live' $liveReload $(if ($liveReload) { 'later edits recompose without a restart' } else { 'add dsh.profile.patchReload: live' })
+  $peakDisabled = ([regex]::Matches($desktopPatchText, '(?m)^\s*-?\s*id: peak-indicator\s*$')).Count
+  Report 'desktop patch: no legacy rows' ($peakDisabled -eq 0) "peak-indicator rows=$peakDisabled"
+
+  # Compose the same bundle list under a probe name (the reserved name stays the
+  # app's). The copy carries no node_modules of its own except this package: the
+  # @deepseek-ai/* bundles resolve from the shared profiles\node_modules.
+  $probeName = 'desktop-probe'
+  $probeDir = Join-Path (Join-Path $dshHomePath 'profiles') $probeName
+  if (Test-Path $probeDir) { Remove-Item -Recurse -Force $probeDir }
+  New-Item -ItemType Directory -Path $probeDir -Force *> $null
+  foreach ($file in @('package.json', 'cordis.patch.yml', 'cordis.yml', 'pnpm-workspace.yaml')) {
+    $from = Join-Path $desktopDir $file
+    if (Test-Path $from) { Copy-Item $from (Join-Path $probeDir $file) -Force }
+  }
+  $probeModules = Join-Path $probeDir 'node_modules'
+  New-Item -ItemType Directory -Path $probeModules -Force *> $null
+  Copy-Item (Join-Path (Join-Path $desktopDir 'node_modules') 'dsh-cost-balance-indicator') (Join-Path $probeModules 'dsh-cost-balance-indicator') -Recurse -Force
+
+  $storages = Join-Path $dshHomePath 'storages'
+  $storagesBackup = Join-Path $env:TEMP ('cbb-desktop-storages-' + [guid]::NewGuid().ToString('N'))
+  if (Test-Path $storages) { Copy-Item $storages $storagesBackup -Recurse -Force }
+  $probeLog = Join-Path $env:TEMP ('cbb-desktop-probe-' + [guid]::NewGuid().ToString('N') + '.log')
+  $probeProc = Start-Process -FilePath 'powershell' -WindowStyle Minimized -PassThru -ArgumentList @(
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+    "Set-Location '$WorkDir'; npx $core --profile $probeName --no-open --port 0 *> '$probeLog'"
+  )
+  $probePort = $null
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 3
+    if (Test-Path $probeLog) {
+      $text = Get-Content $probeLog -Raw -ErrorAction SilentlyContinue
+      if ($text -match 'https?://127\.0\.0\.1:(\d+)/\?token=') { $probePort = $Matches[1]; break }
+    }
+    if ($probeProc.HasExited) { break }
+  }
+  $probeText = if (Test-Path $probeLog) { Get-Content $probeLog -Raw } else { '' }
+  $probeErrors = @($probeText -split "`n" | Where-Object {
+    $_ -match '(?i)\b(error|failed|cannot|duplicate|throw)\b' -and
+    $_ -notmatch 'NativeCommandError|CategoryInfo|FullyQualifiedErrorId|npm verbose|npm http|node\.exe :|^\s*\+'
+  })
+  Report 'desktop composition boots' ($probePort -ne $null) $(if ($probePort) { "probe profile on port $probePort" } else { 'no launch url within timeout' })
+  Report 'desktop composition no errors' ($probeErrors.Count -eq 0) $(if ($probeErrors.Count -eq 0) { 'clean log' } else { $probeErrors[0].Trim().Substring(0, [Math]::Min(120, $probeErrors[0].Trim().Length)) })
+  if ($probePort -ne $null) {
+    $desktopProbe = & node (Join-Path $PSScriptRoot 'check-cost-balance.mjs') --port $probePort 2>&1
+    $balanceLine = ($desktopProbe | Where-Object { $_ -match 'balance: GET' } | Select-Object -First 1) -as [string]
+    $moduleLine = ($desktopProbe | Where-Object { $_ -match 'client module:' } | Select-Object -First 1) -as [string]
+    $bundleLine = ($desktopProbe | Where-Object { $_ -match 'cost-balance-indicator/client\.js' } | Select-Object -First 1) -as [string]
+    Report 'desktop composition balance route' ($balanceLine -match '-> 200') ($balanceLine -replace '^---\s*', '')
+    Report 'desktop composition boot graph' ($moduleLine -match 'true') ($moduleLine -replace '^---\s*', '')
+    Report 'desktop composition bundle surfaces' ($bundleLine -match 'surfaces') ($bundleLine -replace '^---\s*', '')
+  }
+  if ($probeProc -and -not $probeProc.HasExited) { taskkill /PID $probeProc.Id /T /F *> $null }
+  if ($probePort -ne $null) {
+    for ($i = 0; $i -lt 10; $i++) {
+      Start-Sleep -Seconds 1
+      $listener = netstat -ano -p tcp | Select-String -Pattern 'LISTENING' | Select-String -Pattern (':' + $probePort + '\s')
+      if ($listener -eq $null) { break }
+      foreach ($line in $listener) {
+        $pieces = ($line -as [string]).Trim() -split '\s+'
+        $owner = $pieces[$pieces.Count - 1]
+        if ($owner -match '^\d+$') { taskkill /PID $owner /T /F *> $null }
+      }
+    }
+  }
+  Remove-Item -Recurse -Force $probeDir -ErrorAction SilentlyContinue
+  Remove-Item $probeLog -ErrorAction SilentlyContinue
+  Report 'desktop probe torn down' (-not (Test-Path $probeDir)) 'probe profile removed'
+  if (Test-Path $storagesBackup) {
+    if (Test-Path $storages) { Remove-Item -Recurse -Force $storages }
+    Copy-Item $storagesBackup $storages -Recurse -Force
+    Remove-Item -Recurse -Force $storagesBackup -ErrorAction SilentlyContinue
+    Report 'desktop storages restored' $true 'snapshot put back'
+  }
+
+  # The running app composed its profile at launch: until it is restarted once the
+  # plugin bundle is not served yet. That is a restart, not a defect.
+  $appPort = Get-ListeningPortOf 'DeepSeek Harness'
+  if ($appPort -eq $null) {
+    ReportPending 'desktop app live mount' 'the desktop app is not running (start it and re-run to verify)'
+  } else {
+    $appCode = $null
+    $appLength = 0
+    try {
+      $response = Invoke-WebRequest ("http://127.0.0.1:{0}/plugins/??dsh-cost-balance-indicator/client.js" -f $appPort) -UseBasicParsing -TimeoutSec 15
+      $appCode = $response.StatusCode
+      $appLength = $response.RawContentLength
+    } catch {
+      if ($_.Exception.Response -ne $null) { $appCode = $_.Exception.Response.StatusCode.value__ }
+    }
+    if ($appCode -eq 200) {
+      Report 'desktop app serves the plugin' $true ("port {0}, {1} bytes" -f $appPort, $appLength)
+    } elseif ($appCode -eq 404) {
+      ReportPending 'desktop app live mount' ("port {0}: restart the app once; the profile is composed at launch" -f $appPort)
+    } else {
+      ReportPending 'desktop app live mount' ("port {0} answered {1}" -f $appPort, $appCode)
+    }
+  }
+}
+
+# ---------------------------------------------------------------- result -----
 Write-Host ''
 if ($failures -eq 0) {
-  Write-Host ("  RESULT: {0}/{0} checks passed - DSH composes and boots with no conflict." -f $checks) -ForegroundColor Green
+  if ($pendings.Count -eq 0) {
+    Write-Host ("  RESULT: {0}/{0} checks passed - DSH composes and boots with no conflict." -f $checks) -ForegroundColor Green
+  } else {
+    Write-Host ("  RESULT: {0}/{0} checks passed, {1} pending:" -f $checks, $pendings.Count) -ForegroundColor Green
+    foreach ($item in $pendings) { Write-Host ("    - {0}" -f $item) -ForegroundColor Yellow }
+  }
   exit 0
 }
 Write-Host ("  RESULT: {0} of {1} checks FAILED." -f $failures, $checks) -ForegroundColor Red

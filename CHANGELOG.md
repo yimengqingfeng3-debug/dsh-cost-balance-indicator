@@ -2,6 +2,31 @@
 
 版本号遵循语义化版本；每个条目都是一次可复现的改动，配套 `npm test` 与 `verify/self-check.ps1`。
 
+## 0.7.0
+
+**适配 DSH 桌面端（Electron），并让插件在更新的 bundled 内核上优雅降级**
+
+- **桌面端安装**：桌面端运行的是应用私有 profile `desktop`（CLI 明确拒绝组合它：
+  `profile "desktop" is managed exclusively by the Electron application`）。`install.ps1 -Profile desktop`
+  把包放进 `<profile>/node_modules` 并挂载插件行；`install.ps1` 顺带把该 profile 的
+  `dsh.profile.patchReload` 设为 `live`，此后的 patch 修改（含升级插件）无需重启应用。
+- **首次挂载需要重启一次应用**：应用在启动时组合 profile。自检因此把这种情况报成
+  `[WAIT] desktop app live mount`（附重启提示），而不是失败。
+- **只剩一个硬依赖**：宿主半部原来把 `sessionProjections` / `tokenMeter` / `loader` / `settings`
+  全列为必需服务，任一改名就会让插件卡在 `pending`。现在只有 `sessionProjections` 必需，
+  `settings` 与 `loader`（连同 `tokenMeter`）改由 `ctx.inject` 子纤程按需挂载；余额路由本来就在
+  `ctx.inject(["connection"])` 里。新增测试覆盖“没有 settings / loader / tokenMeter 时仍拿到胶囊与路由”。
+- **浏览器半部逐 slot 注册**：六个 slot 现在各自 try/catch，新客户端里某个 slot 不存在时只损失那一处
+  界面（例如只剩设置卡缺失），不会让整个浏览器半部失效。新增对应测试。
+- **自检新增第 6 节（桌面端）**：检查 profile 上的包、唯一插件行、`patchReload: live`、无历史行；
+  把 profile 复制成 `desktop-probe` 探针实例冷启动（余额路由 200 / 启动图含本插件 / 客户端包 6 个组件），
+  跑完拆实例、删探针、还原 `storages`；最后探测**正在运行的应用**端口是否已伺服插件包。
+  新增 `[WAIT]` 报告类型与结尾的 pending 汇总，退出码语义不变（无失败即 0）。
+- **新增 `verify/desktop-shot.ps1`**：把同一份探针组合开进无头 Edge，打开已有会话并截图头部胶囊，
+  用于桌面组合的真实渲染核对。
+- 桌面端实测（应用 0.2.0-rc.2，浅色模式）：`本会话 ¥0.31 · 余额 ¥19.04` ·
+  `💤 闲时 · 1 小时 4 分钟 后切换` · `本轮 ¥0.31` · `余额 ¥19.04`，余额读取成功。
+
 ## 0.6.1
 
 - 打包修正：LICENSE 改为标准 MIT 文本（单一版权行，GitHub 可正确识别为 MIT）并随包分发 CHANGELOG.md。

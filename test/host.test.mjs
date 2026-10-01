@@ -343,9 +343,24 @@ test("resolveApiKey prefers config, then the environment, then the store", async
 test("the default export carries the new row identity", () => {
   assert.equal(namedPlugin, plugin);
   assert.equal(plugin.name, "cost-balance-indicator");
-  assert.deepEqual(plugin.inject, ["sessionProjections", "tokenMeter", "loader", "settings"]);
+  // Only the projection is required: every other integration is mounted through
+  // a ctx.inject sub-fiber so a core that renames or drops one still gets the
+  // pills and the balance route (verified by the degradation test below).
+  assert.deepEqual(plugin.inject, ["sessionProjections"]);
   assert.equal(typeof plugin.apply, "function");
   assert.equal(typeof plugin.Config, "function");
+});
+
+test("a core without settings, loader or token meter still gets the pills and the route", async () => {
+  // The desktop shell and newer bundled cores are the reason this matters: the
+  // plugin must never end up stuck in `pending` because an integration extra is
+  // missing. `makeCtx` only runs ctx.inject bodies whose services all exist.
+  const { ctx, routes, services, projections } = makeCtx({ apiKey: "sk-test", settings: false, compaction: false });
+  await plugin.apply(ctx, Config({}));
+  assert.equal(projections.length, 1, "the peakCost projection is registered");
+  assert.equal(typeof services.deepseekBalance.read, "function", "the balance service exists");
+  assert.equal(routes.length, 1, "the balance route is mounted");
+  assert.equal(services.peakCompactStats, void 0, "no compaction tracking without a loader");
 });
 
 test("the settings schema accepts a browser-written colour palette", () => {

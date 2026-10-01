@@ -40,7 +40,38 @@
 | 12 | 兼容性修复 | — | `settingsNamespace` 垫片（core 0.1.2+ 不再导出）；皮肤 `corner-shape: superellipse` 下强制轮盘正圆；`background` 简写会重置 `background-clip`；写设置为 `set/mutate` 而非 `write` |
 | 13 | 安装 / 换装 | 手动编辑 patch 文件 | `install.ps1`：复制 → 挂载 → 退役旧行，**两段式**写入避开热重载竞态；`-Uninstall` 回退 |
 | 14 | 自检与可视化 | — | `verify/self-check.ps1`（19 项，含冷启动）、`shot.mjs`（真浏览器截图/悬停）、`boot-graph.mjs`（启动图核对） |
-| 15 | 测试 | 无 | **46 项**（主机 16 + 浏览器 30），含一次真实余额读取 |
+| 15 | 测试 | 无 | **48 项**（主机 17 + 浏览器 31），含一次真实余额读取 |
+| 16 | 桌面端（Electron） | 不支持：应用私有 profile 与 CLI 的 `web` 是两套组合 | `install.ps1 -Profile desktop` 一键装进应用私有 profile；自检第 6 节用同组合探针实例验证；桌面端已实测四枚胶囊与余额读取 |
+| 17 | 新内核兼容 | 4 个服务全是硬依赖，缺一个就卡在 `pending`；slot 注册一处失败即整半部失效 | 只有 `sessionProjections` 是硬依赖，其余走 `ctx.inject` 子纤程按需挂载；六个 slot 逐个独立注册 |
+
+## 桌面端（DSH Desktop / Electron）
+
+桌面端用的是**应用私有 profile** `desktop`，与 CLI 的 `web` profile 是两套组合，插件要分别装：
+
+```powershell
+pwsh -File install.ps1 -Profile desktop      # 装进桌面端
+pwsh -File verify/self-check.ps1             # 第 6 节会检查桌面端
+```
+
+- **为什么不能替它启动**：`dsh --profile desktop` 会被拒绝
+  （`profile "desktop" is managed exclusively by the Electron application`）——它由应用自己组合。
+- **首次安装要重启一次应用**：应用在**启动时**组合 profile，正在运行的实例不会看到新行
+  （自检如实报 `[WAIT] desktop app live mount`，不算失败）。安装脚本会同时把
+  `dsh.profile.patchReload` 设为 `live`，所以**此后的修改（含以后升级插件）无需再重启**。
+- **自检怎么验证它**：`self-check.ps1` 第 6 节把 `desktop` profile 复制成 `desktop-probe`
+  （保留同一份 `dsh.profile.bundles`：`dsh-base` + `dsh-web-app` + 本插件行），用 CLI 在空闲端口起探针实例，
+  校验余额路由、启动图与客户端包（6 个组件），跑完拆掉并还原 `storages`；最后访问**正在运行的应用**自己的端口，
+  确认它是否已伺服本插件包（200 = 已挂载）。
+- **想看真实渲染**：`pwsh -File verify/desktop-shot.ps1` 把同一份探针组合开进无头 Edge，
+  打开一个已有会话并截图头部四枚胶囊（跑完自动收摊、还原 `storages`）。
+- **桌面端实测**（应用 0.2.0-rc.2）：头部渲染 `本会话 ¥0.31 · 余额 ¥19.04` 与
+  `💤 闲时 · 1 小时 4 分钟 后切换`，轮末 `本轮 ¥0.31` / `余额 ¥19.04`，余额经应用同一条主机路由读取成功。
+- **为桌面端/新内核做的健壮性改动**（web 端行为不变）：宿主半部**只把 `sessionProjections` 当硬依赖**，
+  `settings` / `loader` / `tokenMeter` 改由 `ctx.inject` 子纤程按需挂载——内核改名或去掉其中一个，
+  插件仍能给出胶囊与余额路由，而不是卡在 `pending`；浏览器半部六个 slot **逐个**注册，
+  某个 slot 在新客户端里不存在时只损失那一处界面。
+- **凭据**：桌面端与 CLI 共用同一个 `DSH_HOME`（`~/.dsh`），密钥按
+  `config.apiKey` → 环境变量 → `ctx.credentials` 解析，始终留在主机侧。
 
 ## 合并来源
 
@@ -245,7 +276,7 @@ pwsh -File install.ps1 -SettleSeconds 8     # 机器慢 / profile 大时放宽�
 ## 测试与验证
 
 ```powershell
-npm test                                        # 46 项：主机 16 + 浏览器 30，含一次真实余额读取
+npm test                                        # 48 项：主机 17 + 浏览器 31，含一次真实余额读取
 pwsh -File verify/self-check.ps1                # 一键自检：组成树 / open_dsh / 冷启动 / 运行中实例
 node verify/check-cost-balance.mjs              # 真实实例端到端探针
 node verify/check-cost-balance.mjs --port 51185 # 指定端口（换端口要换 cookie 受众）
@@ -311,13 +342,13 @@ curl 分不清「路由没挂」和「没登录」。它用凭证库里的 `clie
 ## 打包（已完成，未发布）
 
 ```powershell
-npm run pack        # -> dist/dsh-cost-balance-indicator-0.6.1.tgz
+npm run pack        # -> dist/dsh-cost-balance-indicator-0.7.0.tgz
 ```
 
 发布到 GitHub / npm 的步骤（**本次未执行**，你确认后再跑）：
 
 ```powershell
-git init; git add -A; git commit -m "dsh-cost-balance-indicator 0.6.1"
+git init; git add -A; git commit -m "dsh-cost-balance-indicator 0.7.0"
 gh repo create dsh-cost-balance-indicator --public --source . --push
 npm publish --access public     # 需先 npm login；包名 dsh-cost-balance-indicator 在 npm 上未被占用
 ```
