@@ -887,6 +887,42 @@ test("the save path follows the client's own scope API", async () => {
   }
 });
 
+test("a client without settingsScope or modelDirectories still mounts the pills", () => {
+  // This is the exact shape of the desktop shell's bundled client, and the reason
+  // the required services were cut to `slots` + `locale`: the app aborts its whole
+  // boot when a client entry stays pending ("1 entry did not activate"), so
+  // requiring settingsScope made the desktop app unusable.
+  const exports = loadBundle();
+  // No required service at all: a pending client entry aborts the desktop app's
+  // entire boot, so the services are waited for inside sub-fibers instead.
+  assert.deepEqual(exports.inject, []);
+  const registrations = [];
+  const warnings = [];
+  const ctx = {
+    effect: (callback) => { callback(); return () => {}; },
+    locale: { register: () => () => {} },
+    logger: { warn: (message) => warnings.push(message) },
+    slots: {
+      inject: (name, callback) => callback(),
+      register: (options, component) => { registrations.push({ options, component }); return () => {}; }
+    }
+  };
+  exports.apply(ctx);
+  const ids = registrations.map((item) => item.options.id).sort();
+  assert.deepEqual(ids, [
+    "cost-balance-indicator-balance",
+    "cost-balance-indicator-header",
+    "cost-balance-indicator-peak",
+    "cost-balance-indicator-turn"
+  ], "the four pills mount without a settings service");
+  // The period pill tolerates a missing model directory: it falls back to
+  // "assume DeepSeek" instead of throwing into the render path.
+  const period = registrations.find((item) => item.options.id === "cost-balance-indicator-peak");
+  assert.deepEqual(period.options.inject("session-1"), { directory: null });
+  // There is no host backend here either, so the store reports no save yet.
+  assert.equal(exports.colorStore.getSnapshot().save.status, "idle");
+});
+
 test("a slot the client no longer has costs only that surface", () => {
   // The desktop shell and newer bundled cores are the reason: if one slot name is
   // gone, the remaining pills and the colour store must still register.

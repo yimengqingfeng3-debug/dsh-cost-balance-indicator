@@ -278,6 +278,38 @@ if ($SkipDesktop) {
   $peakDisabled = ([regex]::Matches($desktopPatchText, '(?m)^\s*-?\s*id: peak-indicator\s*$')).Count
   Report 'desktop patch: no legacy rows' ($peakDisabled -eq 0) "peak-indicator rows=$peakDisabled"
 
+  # Neither half may require a service. A pending entry aborts the desktop app's
+  # whole boot (`web boot: 1 entry did not activate`), which is exactly how 0.7.0
+  # made the app unusable: the browser half required `settingsScope`, and the
+  # desktop's bundled client does not provide it.
+  $clientSource = Join-Path $desktopPackage '' # placeholder replaced below
+  $clientPath = Join-Path (Join-Path (Join-Path $desktopDir 'node_modules') 'dsh-cost-balance-indicator') 'lib\client.js'
+  $hostPath = Join-Path (Join-Path (Join-Path $desktopDir 'node_modules') 'dsh-cost-balance-indicator') 'lib\index.js'
+  $clientInjectLine = if (Test-Path $clientPath) { (Select-String -Path $clientPath -Pattern '^\s+var inject = (.*);' | Select-Object -First 1).Line } else { '' }
+  $hostInjectLine = if (Test-Path $hostPath) { (Select-String -Path $hostPath -Pattern '^var inject = (.*);' | Select-Object -First 1).Line } else { '' }
+  $clientEmpty = $clientInjectLine -match 'var inject = \[\];'
+  $hostEmpty = $hostInjectLine -match 'var inject = \[\];'
+  Report 'browser half requires no service' $clientEmpty $(if ($clientEmpty) { 'inject = [] (an entry can never stay pending)' } else { $clientInjectLine.Trim() })
+  Report 'host half requires no service' $hostEmpty $(if ($hostEmpty) { 'inject = [] (mounts through ctx.inject sub-fibers)' } else { $hostInjectLine.Trim() })
+
+  # A boot crash that names this plugin is the app telling us it refused to start.
+  # Only crashes NEWER than the installed client.js count: an older one is fixed.
+  $appLogs = Join-Path $env:APPDATA '@deepseek-ai\dsh-desktop\logs'
+  if (Test-Path $appLogs) {
+    $clientStamp = (Get-Item $clientPath -ErrorAction SilentlyContinue).LastWriteTime
+    $ours = @(Get-ChildItem $appLogs -File -Filter 'crash-*-web-boot.log' -ErrorAction SilentlyContinue |
+      Where-Object { (Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue) -match 'dsh-cost-balance-indicator' } |
+      Sort-Object LastWriteTime -Descending)
+    if ($ours.Count -eq 0) {
+      Report 'desktop crash logs mention us' $true 'no boot crash names this plugin'
+    } elseif ($clientStamp -ne $null -and $ours[0].LastWriteTime -lt $clientStamp) {
+      Report 'desktop crash logs mention us' $true ("last one {0:MM-dd HH:mm} predates the installed build" -f $ours[0].LastWriteTime)
+    } else {
+      $first = (Get-Content $ours[0].FullName | Where-Object { $_ -match 'pending|did not activate' } | Select-Object -First 1)
+      Report 'desktop crash logs mention us' $false ("{0}: {1}" -f $ours[0].Name, ($first -as [string]).Trim())
+    }
+  }
+
   # Compose the same bundle list under a probe name (the reserved name stays the
   # app's). The copy carries no node_modules of its own except this package: the
   # @deepseek-ai/* bundles resolve from the shared profiles\node_modules.
@@ -292,6 +324,21 @@ if ($SkipDesktop) {
   $probeModules = Join-Path $probeDir 'node_modules'
   New-Item -ItemType Directory -Path $probeModules -Force *> $null
   Copy-Item (Join-Path (Join-Path $desktopDir 'node_modules') 'dsh-cost-balance-indicator') (Join-Path $probeModules 'dsh-cost-balance-indicator') -Recurse -Force
+
+  # The app may list bundles it resolves from its own asar
+  # (`@deepseek-ai/dsh-experimental-agent-team-profile` is one). The CLI cannot see
+  # those, and booting with one unresolvable name aborts the probe, so the copy
+  # keeps only the bundles the shared profiles\node_modules actually provides.
+  $sharedModules = Join-Path (Join-Path $dshHomePath 'profiles') 'node_modules'
+  $probeManifest = Get-Content (Join-Path $probeDir 'package.json') -Raw | ConvertFrom-Json
+  $keptBundles = @()
+  $appPrivate = @()
+  foreach ($bundle in $probeManifest.dsh.profile.bundles) {
+    if (Test-Path (Join-Path $sharedModules $bundle)) { $keptBundles += $bundle } else { $appPrivate += $bundle }
+  }
+  $probeManifest.dsh.profile.bundles = $keptBundles
+  [System.IO.File]::WriteAllText((Join-Path $probeDir 'package.json'), ($probeManifest | ConvertTo-Json -Depth 12) + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+  Report 'desktop probe bundles resolvable' ($keptBundles.Count -gt 0) ("kept {0}; app-private dropped: {1}" -f ($keptBundles -join ', '), $(if ($appPrivate.Count -gt 0) { $appPrivate -join ', ' } else { 'none' }))
 
   $storages = Join-Path $dshHomePath 'storages'
   $storagesBackup = Join-Path $env:TEMP ('cbb-desktop-storages-' + [guid]::NewGuid().ToString('N'))

@@ -343,10 +343,10 @@ test("resolveApiKey prefers config, then the environment, then the store", async
 test("the default export carries the new row identity", () => {
   assert.equal(namedPlugin, plugin);
   assert.equal(plugin.name, "cost-balance-indicator");
-  // Only the projection is required: every other integration is mounted through
-  // a ctx.inject sub-fiber so a core that renames or drops one still gets the
-  // pills and the balance route (verified by the degradation test below).
-  assert.deepEqual(plugin.inject, ["sessionProjections"]);
+  // No required service at all: the desktop shell aborts its boot when an entry
+  // stays pending, so every integration is mounted through a ctx.inject sub-fiber
+  // (verified by the degradation test below).
+  assert.deepEqual(plugin.inject, []);
   assert.equal(typeof plugin.apply, "function");
   assert.equal(typeof plugin.Config, "function");
 });

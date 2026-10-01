@@ -42,6 +42,17 @@ $probeModules = Join-Path $probeDir 'node_modules'
 New-Item -ItemType Directory -Path $probeModules -Force *> $null
 Copy-Item (Join-Path (Join-Path $desktopDir 'node_modules') 'dsh-cost-balance-indicator') (Join-Path $probeModules 'dsh-cost-balance-indicator') -Recurse -Force
 
+# Keep only bundles the shared profiles\node_modules can resolve: the app also lists
+# bundles it serves from its own asar, and the CLI aborts on an unresolvable name.
+$sharedModules = Join-Path $profiles 'node_modules'
+$probeManifest = Get-Content (Join-Path $probeDir 'package.json') -Raw | ConvertFrom-Json
+$keptBundles = @()
+foreach ($bundle in $probeManifest.dsh.profile.bundles) {
+  if (Test-Path (Join-Path $sharedModules $bundle)) { $keptBundles += $bundle } else { Write-Host ("dropping app-private bundle {0}" -f $bundle) -ForegroundColor DarkGray }
+}
+$probeManifest.dsh.profile.bundles = $keptBundles
+[System.IO.File]::WriteAllText((Join-Path $probeDir 'package.json'), ($probeManifest | ConvertTo-Json -Depth 12) + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+
 $storages = Join-Path $DshHome 'storages'
 $storagesBackup = Join-Path $env:TEMP ('cbb-shot-storages-' + [guid]::NewGuid().ToString('N'))
 if (Test-Path $storages) { Copy-Item $storages $storagesBackup -Recurse -Force }

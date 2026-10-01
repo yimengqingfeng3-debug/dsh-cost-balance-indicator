@@ -40,7 +40,7 @@
 | 12 | 兼容性修复 | — | `settingsNamespace` 垫片（core 0.1.2+ 不再导出）；皮肤 `corner-shape: superellipse` 下强制轮盘正圆；`background` 简写会重置 `background-clip`；写设置为 `set/mutate` 而非 `write` |
 | 13 | 安装 / 换装 | 手动编辑 patch 文件 | `install.ps1`：复制 → 挂载 → 退役旧行，**两段式**写入避开热重载竞态；`-Uninstall` 回退 |
 | 14 | 自检与可视化 | — | `verify/self-check.ps1`（19 项，含冷启动）、`shot.mjs`（真浏览器截图/悬停）、`boot-graph.mjs`（启动图核对） |
-| 15 | 测试 | 无 | **48 项**（主机 17 + 浏览器 31），含一次真实余额读取 |
+| 15 | 测试 | 无 | **49 项**（主机 17 + 浏览器 32），含一次真实余额读取 |
 | 16 | 桌面端（Electron） | 不支持：应用私有 profile 与 CLI 的 `web` 是两套组合 | `install.ps1 -Profile desktop` 一键装进应用私有 profile；自检第 6 节用同组合探针实例验证；桌面端已实测四枚胶囊与余额读取 |
 | 17 | 新内核兼容 | 4 个服务全是硬依赖，缺一个就卡在 `pending`；slot 注册一处失败即整半部失效 | 只有 `sessionProjections` 是硬依赖，其余走 `ctx.inject` 子纤程按需挂载；六个 slot 逐个独立注册 |
 
@@ -66,10 +66,17 @@ pwsh -File verify/self-check.ps1             # 第 6 节会检查桌面端
   打开一个已有会话并截图头部四枚胶囊（跑完自动收摊、还原 `storages`）。
 - **桌面端实测**（应用 0.2.0-rc.2）：头部渲染 `本会话 ¥0.31 · 余额 ¥19.04` 与
   `💤 闲时 · 1 小时 4 分钟 后切换`，轮末 `本轮 ¥0.31` / `余额 ¥19.04`，余额经应用同一条主机路由读取成功。
-- **为桌面端/新内核做的健壮性改动**（web 端行为不变）：宿主半部**只把 `sessionProjections` 当硬依赖**，
-  `settings` / `loader` / `tokenMeter` 改由 `ctx.inject` 子纤程按需挂载——内核改名或去掉其中一个，
-  插件仍能给出胶囊与余额路由，而不是卡在 `pending`；浏览器半部六个 slot **逐个**注册，
+- **为桌面端/新内核做的健壮性改动**（web 端行为不变）：**两半都不声明任何必需服务**
+  （`inject = []`）——`peakCost` 投影、设置段、自动压缩、余额路由、两套字典与四个 slot
+  全部由 `ctx.inject` 子纤程按需挂载，子纤程等待时**不会**把条目标记为 pending；
   某个 slot 在新客户端里不存在时只损失那一处界面。
+- **⚠️ 为什么"必需服务"是禁区（0.7.0 的真实故障）**：桌面端一旦发现**任何一个条目 pending**，会
+  **中止整个启动**并弹出「应用无法启动或已意外停止」——日志为
+  `web boot: 1 entry did not activate / dsh-cost-balance-indicator: pending (waiting for service: settingsScope)`。
+  0.7.0 的浏览器半部要求了 `settingsScope`，而**桌面端捆绑的客户端不提供它**；CLI 组合里有这个服务，
+  所以用 CLI 探针自检**发现不了**（探针跑的是 CLI 的内核，不是应用的内核）。自检现在把
+  「两半 inject 必须为空」作为硬性不变量，并检查应用 crash 日志中是否存在**晚于本次安装**、
+  提到本插件的启动失败。
 - **凭据**：桌面端与 CLI 共用同一个 `DSH_HOME`（`~/.dsh`），密钥按
   `config.apiKey` → 环境变量 → `ctx.credentials` 解析，始终留在主机侧。
 
@@ -276,7 +283,7 @@ pwsh -File install.ps1 -SettleSeconds 8     # 机器慢 / profile 大时放宽�
 ## 测试与验证
 
 ```powershell
-npm test                                        # 48 项：主机 17 + 浏览器 31，含一次真实余额读取
+npm test                                        # 49 项：主机 17 + 浏览器 32，含一次真实余额读取
 pwsh -File verify/self-check.ps1                # 一键自检：组成树 / open_dsh / 冷启动 / 运行中实例
 node verify/check-cost-balance.mjs              # 真实实例端到端探针
 node verify/check-cost-balance.mjs --port 51185 # 指定端口（换端口要换 cookie 受众）
@@ -342,13 +349,13 @@ curl 分不清「路由没挂」和「没登录」。它用凭证库里的 `clie
 ## 打包（已完成，未发布）
 
 ```powershell
-npm run pack        # -> dist/dsh-cost-balance-indicator-0.7.0.tgz
+npm run pack        # -> dist/dsh-cost-balance-indicator-0.7.1.tgz
 ```
 
 发布到 GitHub / npm 的步骤（**本次未执行**，你确认后再跑）：
 
 ```powershell
-git init; git add -A; git commit -m "dsh-cost-balance-indicator 0.7.0"
+git init; git add -A; git commit -m "dsh-cost-balance-indicator 0.7.1"
 gh repo create dsh-cost-balance-indicator --public --source . --push
 npm publish --access public     # 需先 npm login；包名 dsh-cost-balance-indicator 在 npm 上未被占用
 ```
