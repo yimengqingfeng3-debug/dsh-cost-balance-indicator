@@ -55,6 +55,7 @@ $packageJsonPath = Join-Path $profileDir 'package.json'
 $failures = 0
 $checks = 0
 $pendings = @()
+$packageName = 'dsh-cost-balance-indicator'
 
 function Report([string]$name, [bool]$ok, [string]$detail) {
   $script:checks += 1
@@ -298,6 +299,22 @@ if ($SkipDesktop) {
   Report 'browser half requires no service' $clientEmpty $(if ($clientEmpty) { 'inject = [] (an entry can never stay pending)' } else { $clientInjectLine.Trim() })
   Report 'host half requires no service' $hostEmpty $(if ($hostEmpty) { 'inject = [] (mounts through ctx.inject sub-fibers)' } else { $hostInjectLine.Trim() })
 
+  # Module-level dependencies are the other half of the same trap: `dsh.client.inject`
+  # names the client modules the browser loader must resolve before it activates this
+  # plugin. An id no core provides makes the desktop's loader wait forever, and the
+  # client half then never activates — with no error dialog at all. 0.7.2 shipped the
+  # upstream list, which named `@deepseek-ai/dsh-client-ui-slots`, a module that
+  # exists in no core.
+  $installedManifestPath = Join-Path (Join-Path (Join-Path $desktopDir 'node_modules') $packageName) 'package.json'
+  if (Test-Path $installedManifestPath) {
+    $installedManifest = Get-Content $installedManifestPath -Raw | ConvertFrom-Json
+    $moduleDeps = @()
+    if ($installedManifest.dsh -ne $null -and $installedManifest.dsh.client -ne $null) { $moduleDeps += @($installedManifest.dsh.client.inject) }
+    if ($installedManifest.dshClient -ne $null) { $moduleDeps += @($installedManifest.dshClient.inject) }
+    $moduleDeps = @($moduleDeps | Where-Object { $_ -ne $null -and "$_" -ne '' })
+    Report 'client module deps empty' ($moduleDeps.Count -eq 0) $(if ($moduleDeps.Count -eq 0) { 'nothing can dangle: no module wait' } else { $moduleDeps -join ', ' })
+  }
+
   # A boot crash that names this plugin is the app telling us it refused to start.
   # Only crashes NEWER than the installed client.js count: an older one is fixed.
   $appLogs = Join-Path $env:APPDATA '@deepseek-ai\dsh-desktop\logs'
@@ -329,18 +346,27 @@ if ($SkipDesktop) {
   }
   $probeModules = Join-Path $probeDir 'node_modules'
   New-Item -ItemType Directory -Path $probeModules -Force *> $null
-  Copy-Item (Join-Path (Join-Path $desktopDir 'node_modules') 'dsh-cost-balance-indicator') (Join-Path $probeModules 'dsh-cost-balance-indicator') -Recurse -Force
+  # The manager installs through pnpm, so this entry is usually a junction into
+  # .pnpm — copy the resolved directory, never the link.
+  $sourcePackage = Join-Path (Join-Path $desktopDir 'node_modules') $packageName
+  $sourceItem = Get-Item $sourcePackage -Force -ErrorAction SilentlyContinue
+  $sourcePath = if ($sourceItem -ne $null -and $sourceItem.Target -ne $null -and $sourceItem.Target.Count -gt 0) { $sourceItem.Target[0] } elseif ($sourceItem -ne $null) { $sourceItem.FullName } else { $sourcePackage }
+  if (-not [System.IO.Path]::IsPathRooted($sourcePath)) { $sourcePath = Join-Path (Split-Path $sourcePackage -Parent) $sourcePath }
+  Copy-Item $sourcePath (Join-Path $probeModules $packageName) -Recurse -Force
 
   # The app may list bundles it resolves from its own asar
   # (`@deepseek-ai/dsh-experimental-agent-team-profile` is one). The CLI cannot see
   # those, and booting with one unresolvable name aborts the probe, so the copy
-  # keeps only the bundles the shared profiles\node_modules actually provides.
+  # keeps a bundle only when the probe can actually resolve it: from the shared
+  # profiles\node_modules, or because this probe copied that very package in.
   $sharedModules = Join-Path (Join-Path $dshHomePath 'profiles') 'node_modules'
   $probeManifest = Get-Content (Join-Path $probeDir 'package.json') -Raw | ConvertFrom-Json
   $keptBundles = @()
   $appPrivate = @()
   foreach ($bundle in $probeManifest.dsh.profile.bundles) {
-    if (Test-Path (Join-Path $sharedModules $bundle)) { $keptBundles += $bundle } else { $appPrivate += $bundle }
+    if ($bundle -eq $packageName) { $keptBundles += $bundle }
+    elseif (Test-Path (Join-Path $sharedModules $bundle)) { $keptBundles += $bundle }
+    else { $appPrivate += $bundle }
   }
   $probeManifest.dsh.profile.bundles = $keptBundles
   [System.IO.File]::WriteAllText((Join-Path $probeDir 'package.json'), ($probeManifest | ConvertTo-Json -Depth 12) + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))

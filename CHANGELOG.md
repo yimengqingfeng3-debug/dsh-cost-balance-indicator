@@ -2,6 +2,30 @@
 
 版本号遵循语义化版本；每个条目都是一次可复现的改动，配套 `npm test` 与 `verify/self-check.ps1`。
 
+## 0.7.3
+
+**修复桌面端"启用后界面没反应"：客户端模块依赖指向了一个不存在的模块**
+
+- **根因**：`package.json` 的 `dsh.client.inject` / `dshClient.inject`（继承自上游）声明了四个**客户端模块**依赖，
+  其中 `@deepseek-ai/dsh-client-ui-slots` **在任何核心里都不存在**。CLI 的加载器忽略悬空依赖，
+  桌面端的加载器则**一直等它** → 浏览器半部**永不激活** → 一枚胶囊都不出现，而且**没有任何报错弹窗**。
+  证据来自应用自己的启动图（新增工具 `verify/boot-entry.mjs`）：
+
+  ```
+  inject @deepseek-ai/dsh-client-locale             PRESENT
+  inject @deepseek-ai/dsh-client-ui-conversation    PRESENT
+  inject @deepseek-ai/dsh-client-ui-model-selection PRESENT
+  inject @deepseek-ai/dsh-client-ui-slots           *** MISSING from graph ***
+  ```
+
+- **修复**：两个 inject 列表置为 `[]`。浏览器半部本来就在包内用 `ctx.inject(["slots"], …)` 等待**服务**，
+  不需要任何**模块级**依赖——服务等待跨内核可移植，模块 id 不是。
+- **护栏**：`npm test` 增加「包不得声明客户端模块依赖」；`verify/self-check.ps1` 增加
+  `client module deps empty`，并且是对**已安装的那一份**做检查（本次它当场把 0.7.2 判为 FAIL 并打印悬空清单）。
+- 新增 `verify/boot-entry.mjs`：解析**正在运行**实例的启动图里本插件自己的条目（依赖是否齐全、url、rev）。
+  这个是定位本 bug 的关键工具。
+- 测试 54 项。
+
 ## 0.7.2
 
 **修复桌面端「颜色无法保存」：用应用自己的设置 RPC 落盘**

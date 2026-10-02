@@ -351,6 +351,18 @@ test("the default export carries the new row identity", () => {
   assert.equal(typeof plugin.Config, "function");
 });
 
+test("the package declares no client-module dependency", () => {
+  // `dsh.client.inject` names CLIENT MODULES the browser loader must resolve before
+  // it activates this plugin. The upstream manifest listed
+  // `@deepseek-ai/dsh-client-ui-slots`, which exists in no core at all: the CLI's
+  // loader tolerated the dangling name, the desktop app's loader waited for it
+  // forever, and the client half silently never activated (no pills, no error
+  // dialog). Waiting for the SERVICE inside the bundle is the portable way.
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.deepEqual(manifest.dsh.client.inject, []);
+  assert.deepEqual(manifest.dshClient.inject, []);
+});
+
 test("a core without settings, loader or token meter still gets the pills and the route", async () => {
   // The desktop shell and newer bundled cores are the reason this matters: the
   // plugin must never end up stuck in `pending` because an integration extra is
