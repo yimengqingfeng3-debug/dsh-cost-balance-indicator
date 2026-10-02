@@ -165,8 +165,21 @@ const PROJECTION = {
   messageCosts: { m1: { provider: "deepseek-official", model: "deepseek-v4-flash", turn: 1, period: "offpeak", cost: 0.08 } }
 };
 
-/** Render the four pills of one mount. */
-function renderFour(exports, mounted, state = READY_STATE) {
+/**
+ * A model-directory store stub whose current selection is `current`, shaped like
+ * the one the desktop client hands the period pill. `current: null` is the
+ * still-loading directory.
+ */
+function modelDirectory(current) {
+  return { subscribe: () => () => {}, getSnapshot: () => ({ current }) };
+}
+
+/**
+ * Render the four pills of one mount.
+ * @param options.directory - the model directory the period pill reads; without
+ * one its model is unknown, so its label carries no price.
+ */
+function renderFour(exports, mounted, state = READY_STATE, options = {}) {
   exports.balanceStore.getSnapshot = () => state;
   const header = entryFor(mounted.registrations, HEADER, "cost-balance-indicator-header");
   const period = entryFor(mounted.registrations, HEADER, "cost-balance-indicator-peak");
@@ -174,7 +187,7 @@ function renderFour(exports, mounted, state = READY_STATE) {
   const turnBalance = entryFor(mounted.registrations, TURN, "cost-balance-indicator-balance");
   return {
     // `peak` is the header period pill, `headerBalance` the merged spend+balance one.
-    peak: pillOf(render(period, mounted, { directory: null, load: () => {} })),
+    peak: pillOf(render(period, mounted, { directory: options.directory ?? null, load: () => {} })),
     headerBalance: pillOf(render(header, mounted, { useProjection: () => PROJECTION })),
     turnCost: pillOf(render(turn, mounted, { messageId: "m1", useProjection: () => PROJECTION })),
     turnBalance: pillOf(render(turnBalance, mounted))
@@ -226,11 +239,14 @@ test("the header merges spend+balance on the left and the period on the right", 
   assert.equal(period.options.inject("session-1").directory.getSnapshot(), null);
 
   // The merged pill shows both money figures joined by a middle dot, and no
-  // period state; the period pill shows the state and the countdown, and no ¥.
+  // period state; the period pill shows the state, this period's unit prices and
+  // the countdown — with no model directory `renderFour` hands it an unknown
+  // model, so it must print no number at all here.
   const pills = renderFour(exports, mounted);
   assert.equal(pills.headerBalance.children[0], "本会话 ¥0.94 · 余额 ¥32.65");
   assert.match(pills.peak.children[0], /闲时|高峰/);
   assert.doesNotMatch(pills.peak.children[0], /¥/);
+  assert.doesNotMatch(pills.peak.children[0], /\/M/);
   assert.match(pills.peak.children[0], /后切换$/);
   // Without spend or with an unreadable balance the pill keeps only what it knows.
   exports.balanceStore.getSnapshot = () => READY_STATE;
@@ -305,10 +321,80 @@ test("the header period pill keeps its peak/off-peak behaviour and countdown", (
   const pill = pillOf(element);
   assert.match(pill.children[0], /闲时|高峰/);
   assert.match(pill.children[0], /后切换$/);
+  // With no known model there is no price to show: the session cost lives in the
+  // merged pill on the left, and the period pill must never invent a number.
   assert.doesNotMatch(pill.children[0], /¥/, "the session cost moved to the merged pill");
   assert.equal(pill.props.style.lineHeight, "18px");
   // The detail text moved into the colour overlay, so it travels as a prop.
   assert.match(element.props.tip, /切换计价时段/);
+});
+
+// ------------------------------------------- period pill unit prices --------
+
+/** The period pill's rendered element for one model selection. */
+function periodElement(exports, mounted, current) {
+  const badge = entryFor(mounted.registrations, HEADER, "cost-balance-indicator-peak");
+  return render(badge, mounted, { directory: modelDirectory(current), load: () => {} });
+}
+
+test("the header period pill spells this period's prices out in the official order", () => {
+  const exports = loadBundle();
+  const mounted = mount(exports);
+  const zh = mounted.dictionaries[exports.NS_PEAK].zh;
+  const period = exports.currentPeriod(new Date());
+  const element = periodElement(exports, mounted, { provider: "deepseek-official", model: "deepseek-v4-flash" });
+  const label = pillOf(element).children[0];
+  const prices = exports.modelPrices("deepseek-v4-flash", period);
+  // The unit marker is one dictionary pair; zh says "/M", en says "/M tokens".
+  assert.equal(zh["colors.priceUnit"], "/M");
+  assert.equal(mounted.dictionaries[exports.NS_PEAK].en["colors.priceUnit"], "/M tokens");
+  // The off-peak example from the changelog: 0.04/2/8 halved, cache-hit first.
+  assert.deepEqual(exports.modelPrices("deepseek-v4-flash", "offpeak"), { input: 1, output: 4, cacheHitInput: 0.02 });
+  const shown = `¥${exports.formatPrice(prices.cacheHitInput)}/¥${exports.formatPrice(prices.input)}/¥${exports.formatPrice(prices.output)} ${zh["colors.priceUnit"]}`;
+  assert.ok(label.startsWith(`${zh["badge." + period]} ${shown}`), label);
+  // …followed by the unchanged countdown tail (`badge.next`).
+  assert.match(label.slice(`${zh["badge." + period]} ${shown}`.length), /^ · .+ 后切换$/);
+  // Order is cache-hit input / cache-miss input / output, with the period's own
+  // state first and the countdown last.
+  assert.match(label, /^(\u26A1 高峰|\u{1F4A4} 闲时) ¥[\d.]+\/¥[\d.]+\/¥[\d.]+ \/M · .+ 后切换$/u);
+  // `formatPrice` trims: peak flash is ¥0.04/¥2/¥8, off-peak exactly half.
+  assert.deepEqual([exports.formatPrice(prices.cacheHitInput), exports.formatPrice(prices.input), exports.formatPrice(prices.output)],
+    period === "offpeak" ? ["0.02", "1", "4"] : ["0.04", "2", "8"]);
+  // The overlay spells the same order out in words, and states the unit once.
+  const tip = element.props.tip;
+  assert.ok(tip.includes(`缓存命中 ${exports.formatPrice(prices.cacheHitInput)} · 未命中输入 ${exports.formatPrice(prices.input)} · 输出 ${exports.formatPrice(prices.output)}`), tip);
+  assert.equal((tip.match(/每百万 tokens/g) ?? []).length, 1, tip);
+  // The English line keeps the same order and unit.
+  const en = mounted.dictionaries[exports.NS_PEAK].en;
+  assert.match(en["tip.price"], /^Cache hit \{cacheHitInput\} · Cache-miss input \{input\} · Output \{output\} \(CNY per 1M tokens\)$/);
+});
+
+test("a model with no price entry keeps the period pill's label unchanged", () => {
+  const exports = loadBundle();
+  const mounted = mount(exports);
+  const zh = mounted.dictionaries[exports.NS_PEAK].zh;
+  const period = exports.currentPeriod(new Date());
+  // A still-loading selection, a non-DeepSeek model name and a DeepSeek model
+  // whose price is not in the table: none of them may print a made-up number.
+  const unknown = [null, "mystery-9", "deepseek-v5-flash"];
+  for (const model of unknown) {
+    assert.equal(exports.modelPrices(model, period), null, `${model} has no price entry`);
+    const current = model === "mystery-9" ? { provider: "some-gateway", model } : model === null ? null : { provider: "deepseek-official", model };
+    const label = pillOf(periodElement(exports, mounted, current)).children[0];
+    if (model === "mystery-9") {
+      // Not a DeepSeek flash/pro model: the badge stays the "other model" one.
+      assert.equal(label, zh["badge.other"]);
+    } else {
+      assert.ok(!label.includes("¥"), label);
+      assert.ok(!label.includes("/M"), label);
+      assert.match(label, /后切换$/);
+    }
+  }
+  // The known model in the same mount DOES carry prices, so the check above is
+  // about the price table and not about the label never changing.
+  const known = pillOf(periodElement(exports, mounted, { provider: "deepseek-official", model: "deepseek-v4-flash" })).children[0];
+  assert.ok(known.includes("¥"));
+  assert.ok(known.includes(zh["colors.priceUnit"]));
 });
 
 test("the settings card still binds the merged settings namespace", () => {
@@ -571,7 +657,7 @@ test("the wheel is forced round and clipped to its own circle", () => {
   assert.equal(element.props.style.cornerShape, void 0);
 });
 
-test("only the header balance overlay offers the top-up shortcut", () => {
+test("every pill's overlay offers the top-up shortcut", () => {
   const exports = loadBundle();
   const mounted = mount(exports);
   const resolved = { text: "#0f7b3d", border: "#7fd6a8", background: "#d9f2e2" };
@@ -582,15 +668,105 @@ test("only the header balance overlay offers the top-up shortcut", () => {
     anchor: { top: 0, left: 0 },
     resolved
   })).filter((node) => node.type === "a");
-  const link = anchorsFor("headerBalance");
-  assert.equal(link.length, 1);
-  assert.equal(link[0].props.href, "https://platform.deepseek.com/top_up");
-  assert.equal(link[0].props.target, "_blank");
-  assert.equal(link[0].props.rel, "noreferrer noopener");
-  assert.equal(link[0].children[0], "充值");
-  assert.match(link[0].props.title, /platform\.deepseek\.com\/top_up/);
-  for (const pillKey of ["peak", "turnCost", "turnBalance"]) {
-    assert.equal(anchorsFor(pillKey).length, 0, `${pillKey} must not carry the link`);
+  for (const pillKey of exports.PILL_KEYS) {
+    const links = anchorsFor(pillKey);
+    assert.equal(links.length, 1, `${pillKey} carries the top-up entry`);
+    assert.equal(links[0].props.href, "https://platform.deepseek.com/top_up");
+    assert.equal(links[0].props.target, "_blank");
+    assert.equal(links[0].props.rel, "noreferrer noopener");
+    assert.equal(links[0].children[0], "充值");
+    // The same pill geometry as before, and one tooltip that describes the entry
+    // on every pill instead of claiming to belong to the balance pill only.
+    assert.equal(links[0].props.style.borderRadius, 999);
+    assert.equal(links[0].props.style.textDecoration, "none");
+    assert.equal(links[0].props.style.fontSize, 11);
+    assert.match(links[0].props.title, /充值页/);
+    assert.match(links[0].props.title, /登录页/);
+    assert.match(links[0].props.title, /platform\.deepseek\.com\/top_up/);
+  }
+  // Both dictionaries carry the same wording, and the top-up label itself.
+  assert.equal(mounted.dictionaries[exports.NS_BALANCE].en["colors.topup"], "Top up");
+  assert.match(mounted.dictionaries[exports.NS_BALANCE].en["colors.topup.tip"], /sign-in page/);
+  assert.match(mounted.dictionaries[exports.NS_PEAK].zh["colors.topup.tip"], /充值页/);
+});
+
+test("with no balance data the top-up entry falls back to the sign-in page", () => {
+  const exports = loadBundle();
+  const mounted = mount(exports);
+  const resolved = { text: "#0f7b3d", border: "#7fd6a8", background: "#d9f2e2" };
+  const OFFICIAL_TOPUP = "https://platform.deepseek.com/top_up";
+  const OFFICIAL_LOGIN = "https://platform.deepseek.com/sign_in";
+  // Rendered on a turn pill, i.e. not the balance pill: the entry is unconditional.
+  const hrefFor = (state) => {
+    const original = exports.balanceStore.getSnapshot;
+    exports.balanceStore.getSnapshot = () => state;
+    try {
+      const links = collect(exports.PillColorPanel({
+        t: mounted.t(exports.NS_BALANCE),
+        pillKey: "turnCost",
+        tip: "tip",
+        anchor: { top: 0, left: 0 },
+        resolved
+      })).filter((node) => node.type === "a");
+      assert.equal(links.length, 1);
+      return links[0].props.href;
+    } finally {
+      exports.balanceStore.getSnapshot = original;
+    }
+  };
+  // A snapshot with no payload at all keeps the links the last payload left
+  // behind — that is the no-key case, and there the sign-in page comes first.
+  assert.equal(hrefFor({ status: "error", data: null, error: "no key", links: { topUpUrl: OFFICIAL_TOPUP, loginUrl: OFFICIAL_LOGIN } }), OFFICIAL_LOGIN);
+  // Nothing known at all: the official top-up page is the last resort.
+  assert.equal(hrefFor({ status: "error", data: null, error: "HTTP 401" }), OFFICIAL_TOPUP);
+  assert.equal(hrefFor({ status: "idle", data: null, error: null, links: null }), OFFICIAL_TOPUP);
+  // A payload that could read no balance prefers its own sign-in page…
+  assert.equal(hrefFor({
+    status: "error",
+    data: { ok: false, error: "没有找到 DeepSeek API Key", topUpUrl: "https://gw.example.com/top_up", loginUrl: "https://gw.example.com/sign_in" }
+  }), "https://gw.example.com/sign_in");
+  // …while a payload that DID read a balance keeps the endpoint's top-up page.
+  assert.equal(hrefFor({
+    status: "ready",
+    data: { ok: true, totalBalance: 32.65, topUpUrl: "https://gw.example.com/top_up", loginUrl: "https://gw.example.com/sign_in" }
+  }), "https://gw.example.com/top_up");
+});
+
+test("a failed balance read keeps the endpoint's top-up and sign-in pages", async () => {
+  const exports = loadBundle();
+  const mounted = mount(exports);
+  globalThis.fetch = () => Promise.resolve({
+    status: 200,
+    json: () => Promise.resolve({
+      ok: false,
+      error: "没有找到 DeepSeek API Key",
+      topUpUrl: "https://gw.example.com/top_up",
+      loginUrl: "https://gw.example.com/sign_in",
+      fetchedAt: 1
+    })
+  });
+  try {
+    await exports.balanceStore.refresh(true);
+    const snapshot = exports.balanceStore.getSnapshot();
+    assert.equal(snapshot.status, "error");
+    assert.equal(snapshot.data, null, "a failed read still reports no balance");
+    assert.deepEqual(snapshot.links, { topUpUrl: "https://gw.example.com/top_up", loginUrl: "https://gw.example.com/sign_in" });
+    // …and that is what makes the overlay's 充值 entry reach the sign-in page.
+    const links = collect(exports.PillColorPanel({
+      t: mounted.t(exports.NS_BALANCE),
+      pillKey: "headerBalance",
+      tip: "tip",
+      anchor: { top: 0, left: 0 },
+      resolved: { text: "#0f7b3d", border: "#7fd6a8", background: "#d9f2e2" }
+    })).filter((node) => node.type === "a");
+    assert.equal(links[0].props.href, "https://gw.example.com/sign_in");
+    // A later network failure keeps them rather than blanking the entry.
+    globalThis.fetch = () => Promise.reject(new Error("offline"));
+    exports.balanceStore.stopPolling();
+    await exports.balanceStore.refresh(true);
+    assert.deepEqual(exports.balanceStore.getSnapshot().links, { topUpUrl: "https://gw.example.com/top_up", loginUrl: "https://gw.example.com/sign_in" });
+  } finally {
+    delete globalThis.fetch;
   }
 });
 
@@ -1218,6 +1394,8 @@ test("the top-up link follows the endpoint the host resolved", () => {
   };
   // The host hands back the endpoint's own pages …
   assert.equal(hrefFor({ ok: true, totalBalance: 32.65, topUpUrl: "https://gw.example.com/top_up", loginUrl: "https://gw.example.com/sign_in" }), "https://gw.example.com/top_up");
+  // … the sign-in page when the endpoint answered without a balance (no key) …
+  assert.equal(hrefFor({ ok: false, error: "no key", topUpUrl: "https://gw.example.com/top_up", loginUrl: "https://gw.example.com/sign_in" }), "https://gw.example.com/sign_in");
   // … and the official page is the fallback while no payload carries one.
   assert.equal(hrefFor(void 0), "https://platform.deepseek.com/top_up");
   assert.equal(hrefFor({ ok: false, error: "no key" }), "https://platform.deepseek.com/top_up");
