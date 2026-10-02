@@ -271,8 +271,14 @@ if ($SkipDesktop) {
   Report 'desktop profile package installed' (Test-Path $desktopPackage) $(if (Test-Path $desktopPackage) { 'node_modules\dsh-cost-balance-indicator' } else { 'run: install.ps1 -Profile desktop' })
   $desktopPatchText = if (Test-Path $desktopPatch) { Get-Content $desktopPatch -Raw } else { '' }
   $desktopRows = ([regex]::Matches($desktopPatchText, '(?m)^\s*-?\s*id: cost-balance-indicator\s*$')).Count
-  Report 'desktop patch: exactly one row' ($desktopRows -eq 1) "count=$desktopRows"
   $manifestText = if (Test-Path $desktopManifest) { Get-Content $desktopManifest -Raw } else { '' }
+  # Two ways to mount this package: one patch row (install.ps1), or an entry in
+  # `dsh.profile.bundles` (the app's own plugin manager). Exactly ONE of them may
+  # be present: both would mount the same loader id twice and fail the boot with a
+  # duplicate entry, which is the reason install.ps1 checks this too.
+  $inBundles = $manifestText -match ('"' + [regex]::Escape($packageName) + '"')
+  $oneMount = ($desktopRows -eq 1) -xor $inBundles
+  Report 'desktop: exactly one mount path' $oneMount ("patch rows={0}, listed in bundles={1}" -f $desktopRows, $inBundles)
   $liveReload = $manifestText -match '"patchReload"\s*:\s*"live"'
   Report 'desktop manifest: patchReload live' $liveReload $(if ($liveReload) { 'later edits recompose without a restart' } else { 'add dsh.profile.patchReload: live' })
   $peakDisabled = ([regex]::Matches($desktopPatchText, '(?m)^\s*-?\s*id: peak-indicator\s*$')).Count
