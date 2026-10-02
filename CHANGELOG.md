@@ -2,6 +2,47 @@
 
 版本号遵循语义化版本；每个条目都是一次可复现的改动，配套 `npm test` 与 `verify/self-check.ps1`。
 
+## 0.8.2
+
+**修复桌面端配色覆盖栏一直显示「已存本机（主机未接受，重启 DSH 后就会写入配置）」：桌面端其实能绑上设置后端，只是没绑**
+
+- **根因**：桌面端捆绑的客户端**不提供** `settingsScope` 绑定器，设置面只有命名空间服务 `remote.settings`（`describe()` / `mutate(ns, ops, expectedRevision)`）。浏览器半部此前只按 `whenReady(ctx, ["remote.settings"], …)` 从子纤程里读一次 `ctx.remote.settings`：这一次读取在未注入的上下文里必然抛
+  `cannot get property "remote.settings" without inject`，异常被 `createRemoteSettingsBackend` 吞掉后返回 `null`，于是 `persistColors()` 找不到任何可用写入方 → `save.status === "local"`，配色只留在浏览器存储里。挂载本身没问题（四枚胶囊都在），所以外观上只有一个说谎的状态行。
+- **修复：按设施依次解析 `remote.settings`，失败则重试（全部加保护，绝不中断挂载）**
+  1. `ctx.get("remote.settings")`（客户端自己的服务查询）；
+  2. 受保护的直接属性读取 `ctx.remote.settings`（捕获注入异常并记进报告）；
+  3. `ctx.inject(["remote.settings"], cb)`（异步子纤程，不会把条目标记为 pending），**每次重试都重新请求**——服务还没起来时被忽略的请求否则再也没人补发；
+  4. 三条路都没有结果时按 0.12 / 0.3 / 0.8 / 1.5 / 2.6 秒重试，成功即停；仍无结果才回退浏览器存储。
+  持久化优先级不变：`settingsScope` 绑定器（web profile）→ `remote.settings` RPC（桌面端）→ 浏览器存储（最后兜底）。
+- **自诊断报告新增配色存储字段**，应用现在能自证：`colorBackendBound` / `colorBackendKind`（`scope-binder` / `remote-rpc` / `none`）/ `colorBackendWritable` / `colorBackendResolvedVia`（哪条路成功）/ `colorSaveStatus` / `colorSaveMessage` / `colorRpcAttempts` / `colorRpcNulls` / `colorResolveNotes`；捕获到的异常原文也进 `warnings`（属性读取抛错、`describe`/`mutate` 缺失两种都记）。
+- **测试 67 项**（原 63）：新增「命名空间属性在注入前抛错 → 重试后仍绑上 RPC 后端，编辑后 `save.status` 变 `saved`」「只有 `ctx.inject` 能到达服务时也绑得上」「两种设施都没有 → 状态保持 `local`、浏览器副本留住配色」「报告里带齐配色存储字段与解析路径」。
+- 文档：README 修掉时段胶囊「不带 ¥」的旧描述（0.8.1 起带当前时段单价）与「充值只在头部余额」的旧描述（0.8.1 起四枚都有），并补上后端探测顺序一节。
+
+**内置配色改为浅色面板；单价从胶囊标签移到覆盖栏最底部**
+
+- **去掉「默认」预设：现在默认就是浅色面板**。覆盖栏只有 **深色** / **浅白** 两档；`DEFAULT_PILL_COLORS.neutral` 从原来的价格片绿（`#0f7b3d` / `#d9f2e2` / `#7fd6a8`）换成桌面端浅色表面（文字 `#0F1115` / 边框 `#E1E5EE` / 背景 `#F5F6F7`），与「浅白」预设同一组 hex（两个常量同源声明，不会再各自漂移）。**状态信号保留**：高峰时段与余额低于阈值仍是红（`#ffffff` on `#e5484d`），余额读不到仍是中性灰（`#667085` / `#d0d5dd` / `#eef0f2`）。因此未调过色的默认观感是「浅色面板，高峰/低余额变红」。
+- **未自定义时高亮「浅白」**：`activePresetId()` 不再靠「全空 → 返回 default」，而是让空 scope 直接命中 light 预设；手改任一颜色后（匹配不上任何预设）高亮照旧消失，`resetScope` / `resetAll` 清空后又回到浅白高亮。`applyPreset` 不再有「无颜色」分支。
+- **重置按钮文案**：`colors.reset.one` = 「恢复浅色默认」（en *Restore light default*），`colors.reset.all` = 「全部恢复浅色默认」（en *Reset all to light*）；删掉 `colors.preset.default` / `colors.preset.default.tip`（zh、en 两套），不留任何指向已删预设的字符串。
+- **单价不再压在时段胶囊上**：`PeriodBadge` 的标签回到 0.8.1 之前的样子 —— `badge.<period>` + `badge.next`（`💤 闲时 · 43 小时 11 分钟 后切换`），不再有 `¥…/M`；tooltip 仍保留时段、倒计时与北京时间（并去掉重复的三项单价）。
+- **新增 `priceNote`：价格行的家在覆盖栏最底部**。`ColorablePill` 接收并转发给 `PillColorPanel`，后者把它渲染成**面板最后一块**（独立一行、与 tip 行同样带上边框）：
+  `当前时段（闲时）每百万 tokens：缓存命中 ¥0.02 · 未命中 ¥1 · 输出 ¥4`（高峰则为 `当前时段（高峰）…`；en：`Current period (off-peak) per 1M tokens: cached ¥0.02 · uncached ¥1 · output ¥4`）。顺序固定为 命中 / 未命中 / 输出；模型没有官方峰谷价时改说 `该模型无官方峰谷价`（en *No official peak/off-peak price for this model*），非 DeepSeek 模型则说 `当前模型 {model}（非 DeepSeek）无官方峰谷价`。内容在知道时段与模型的地方构建：头部时段胶囊，以及**知道自己是哪个时段**的本轮费用胶囊（用该轮记录下来的 `period`，所以历史轮显示它当时的价格）。**余额胶囊不传 `priceNote`**（覆盖栏本来就是余额明细），不传的胶囊面板与现在完全一致。
+- **测试 72 项**（原 67）：改写预设测试（列表恰为 `[dark, light]`、无自定义时高亮浅白、内置色即浅色 hex、alert 仍为红、muted 仍为灰），新增「时段胶囊标签不含 ¥」「时段覆盖栏底部的价格行含当前时段三项官方价、顺序为命中/未命中/输出且每百万 tokens 只出现一次」「未知模型显示无官方峰谷价（非 DeepSeek 显示带模型名的说法）」「余额胶囊覆盖栏没有价格行、不传 `priceNote` 的胶囊面板不变」「本轮费用胶囊按自己那一轮的时段给出行」。
+- 文档：README 改掉「三档预设 / 默认 = 插件自带配色 / 时段胶囊带单价」，写明「没有 默认 预设，默认是浅色面板」与「价格行在覆盖栏最底部，不在胶囊上」。
+
+**取色改为自建吸色模式（原生 `EyeDropper` 无法右键取消）；覆盖栏开合动画；保存按钮动效**
+
+- **取色不再用 `window.EyeDropper`，改成我们自己的吸色模式**。原生那个是**浏览器级模态**：它开着的时候页面收不到任何鼠标事件，「右键取消」在它身上无法实现。现在的「🖌 取色」按钮**永远渲染**（不再判断 `window.EyeDropper` 是否存在），点它武装自建模式：
+  - 一层 `position: fixed; inset: 0; cursor: crosshair` 的**全屏透明捕获层**（`z-index` = 面板自己的 10000，**不给页面加任何底色** —— 不做整屏蒙层），加一枚**跟随光标的预览小片**（90×26，`transform: translate()` 偏移光标右下 14px，贴边自动翻到另一侧），小片里是色块 + `#RRGGBB` + 一行提示 `左键确认 · 右键取消`（en `Click to confirm · right-click to cancel`）。
+  - 颜色取自 `document.elementFromPoint(x, y)`：先看该元素的 `backgroundColor`（透明/`rgba(0,0,0,0)` 跳过），**向上逐级找第一个非透明背景**，一路都没有才退回该元素的 `color`（纯文字）。解析走现有 `hexToRgb` / `rgbToHex` / `cleanColor` 家族（新增 `computedColorToHex` 把 `rgb()`/`rgba()` 与 `#RRGGBB` 两种 computed 序列化都归一化），**只有 `#RRGGBB` 会进 store**；非法值（`color(display-p3 …)`、命名色）一律丢弃。
+  - **左键**（捕获层上的 `mousedown` button 0）= 确认：`colorStore.setColor(scopeKey, target, hex)` 后退出；**右键**（`contextmenu` 与 `mousedown` button 2，都 `preventDefault`）、**`Esc`**、以及窗口 `resize` = 取消并退出。退出统一走 `disarmColorPicker()`：移除捕获层与小片、注销四个文档监听 + 一个 window 监听、清空状态标志，不留悬挂监听器。捕获层盖住一切，所以模式期间不会有别处交互漏进来。
+  - 全链路加保护：模块被测试导入（无 `document`）时 `armColorPicker` 直接返回 false，构建中途失败也会自清（不会留下半武装状态）。
+- **覆盖栏开合动画**：弹出为**淡入 + 0.96 → 1 缩放**、带轻微过冲（62% 处 1.012），140ms；收起为同一动效**反向** 100ms。`transform-origin` 由胶囊屏幕位置（`anchor`，即面板左上角）推算成 `x/y` 百分比 —— 覆盖栏因此是**从胶囊里长出来**的。关闭不再是「直接卸载」：`ColorablePill` 把面板标记为 `closing`，面板播完反向动画（`onAnimationEnd`）才卸载，因此收起动画真的看得见。
+- **保存按钮动效**：悬停微抬（`translateY(-1px)` + 阴影）、`:active` 缩到 0.96、`saving` 轻微脉动、`saved` 短暂放大并补一个 `✓`（原来变绿保留）、`error` 抖动一下并按 `--dsw-alias-label-error` 转红。**全部由 `data-cost-balance-save-state` 驱动**，而它写的就是面板状态行读的同一个 `save.status`，所以动效与存储状态不可能不一致；`saving` 时按钮另加 `aria-busy`。悬停/按下的终态写在 `animation-duration: 1ms` 的「revert 层」关键帧里，避免与 `:hover`/`:active` 规则互相打架。
+- **一个幂等的 `<style>`**：轮播与保存按钮的全部关键帧、`prefers-reduced-motion: reduce` 分支都在**同一个** `id = dsh-cost-balance-indicator-overlay-style` 的标签里，注入前先 `getElementById` 认领已有标签、并记住已服务的 `document`，重复挂载/重复调用都只注入一次；`document` 不可用时整段静默跳过，绝不抛错。
+- **两处动画都尊重 `prefers-reduced-motion: reduce`**：覆盖栏退化为**纯淡入淡出（无缩放）**；保存按钮的悬停/按下/抖动/放大关闭，`saving` 只留一个很轻的明暗呼吸。
+- **测试 89 项**（原 79）：新增「没有 `window.EyeDropper` 时「取色」按钮仍渲染」「武装后生成透明捕获层（`inset:0` / `cursor:crosshair` / 不染色）与 90×26 预览小片，`mousemove` 经 stub `elementFromPoint` 得出期望 hex 并在小片里显示」「左键把该 hex 经 `colorStore.setColor` 写入并解除武装、节点与监听全清」「右键 / `contextmenu` / `Esc` 三种取消都退出且**不写入**」「取值链：透明背景→最近的祖先背景→文字色，且只产出 `#RRGGBB`」「覆盖栏带弹出动画样式与由 anchor 推算的 `transform-origin`；`hovering a pill runs the pop on open and the reverse on close` 走通 开→关→`animationend` 卸载」「样式表只注入一次（第二次调用与第二个 bundle 副本都认领同一标签）」「`prefers-reduced-motion` 下换成纯淡入淡出」「`data-cost-balance-save-state` 依次跟随 `saving`/`saved`/`error`，`aria-busy` 同步」。现有测试仍用假 `document`/`window` 对象（新增 `fakeDom()` 辅助），没有引入真实 DOM。
+- 文档：README 补「取色（自建吸色模式）」与「覆盖栏开合动画 / 保存按钮动效 / 两处都尊重 reduced motion」三节、覆盖栏示意图加上「🖌 取色」、保存状态表补上对应动效，并在 `npm test` 清单里列出上述新用例。
+
 ## 0.8.1
 
 - **头部时段胶囊直接显示价格**：标签由「时段 + 倒计时」改为「时段 + 当前时段单价 + 倒计时」，例如 `💤 闲时 ¥0.02/¥1/¥4 /M · 56 小时 53 分钟 后切换`（顺序 = 缓存命中输入 / 未命中输入 / 输出，每百万 tokens，人民币，取自官网牌价）。模型价格未知时保持原标签，绝不显示错数。
@@ -134,8 +175,9 @@
 ## 0.4.0
 
 - **0.5 秒悬停意图**：光标需在胶囊上停留 0.5 秒才弹出覆盖栏（离开 240ms 收起，提前离开则取消）。
-- **三档配色预设**：默认（插件自带配色，等同原「恢复默认」）/ 深色（Catppuccin Frappé `#414559`）/
-  浅白（Catppuccin Latte `#EFF1F5`），与深浅模式配色一致，当前生效项高亮。
+- **三档配色预设**：默认（插件自带配色，等同原「恢复默认」）/ 深色（`#414559`）/
+  浅白（`#EFF1F5`），与当时的深浅模式配色一致，当前生效项高亮。
+  （当时的取值后来在 0.8.0 换成桌面端自身主题色，0.8.2 起更只剩「深色 / 浅白」两档。）
 - 预设与调色共用「整体 / 单个」作用域。
 
 ## 0.3.2

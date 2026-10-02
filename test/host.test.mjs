@@ -15,6 +15,7 @@ import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import z from "@deepseek-ai/schemastery";
 
 import plugin, {
   BALANCE_PATH,
@@ -28,6 +29,7 @@ import plugin, {
   createPeakCostProjection,
   currentPeriod,
   isCnHoliday,
+  markVolatile,
   normalizeBalanceConfig,
   parseBalancePayload,
   periodAt,
@@ -37,12 +39,21 @@ import plugin, {
 } from "../lib/index.js";
 
 /** Build a fake host context capturing routes, services and projections. */
-function makeCtx({ apiKey, connection = true, compaction = false, settings = true } = {}) {
+function makeCtx({ apiKey, connection = true, compaction = false, settings = true, settingsApi = "register" } = {}) {
   const routes = [];
   const services = {};
   const projections = [];
   const loaderUpdates = [];
   const listeners = [];
+  const settingsRegistrations = [];
+  // "register" is the dsh-settings 0.1.x API this plugin was written against;
+  // "modern" is the desktop app's bundled 0.2.x core, which has neither
+  // register() nor watch() and takes the namespace from the loader row's Config.
+  const settingsService = settings
+    ? settingsApi === "register"
+      ? { register: (ns, schema, options) => { settingsRegistrations.push({ ns, schema, options }); return { watch: () => {} }; } }
+      : { describe: () => [], update: async () => {}, replace: async () => {}, mutate: async () => {} }
+    : void 0;
   const ctx = {
     connection: connection ? { fetch: { register: (route) => { routes.push(route); return () => {}; } } } : void 0,
     get(name) {
@@ -57,7 +68,7 @@ function makeCtx({ apiKey, connection = true, compaction = false, settings = tru
       resolve: (id) => (compaction && id === "compaction-basic" ? { id } : void 0),
       update: (id, patch) => { loaderUpdates.push({ id, patch }); }
     },
-    settings: settings ? { register: () => ({ watch: () => {} }) } : void 0,
+    settings: settingsService,
     on: (event, listener) => { listeners.push({ event, listener }); },
     effect: (callback) => { const dispose = callback(); return () => { if (typeof dispose === "function") dispose(); }; },
     provide: (key, value) => { services[key] = value; },
@@ -66,7 +77,7 @@ function makeCtx({ apiKey, connection = true, compaction = false, settings = tru
     inject: (deps, callback) => { if (deps.every((dep) => ctx[dep] !== void 0)) callback(ctx); },
     logger: { info() {}, warn() {}, error() {} }
   };
-  return { ctx, routes, services, projections, loaderUpdates, listeners };
+  return { ctx, routes, services, projections, loaderUpdates, listeners, settingsRegistrations };
 }
 
 /** Start a mock balance endpoint; returns its base URL and a hit counter. */
@@ -443,6 +454,118 @@ test("the settings schema accepts a browser-written colour palette", () => {
   }
   // The schema is also what the plugin registers with the settings service.
   assert.equal(typeof SettingsConfig({}).pillColors.mode, "string");
+});
+
+test("pillColors is declared volatile so a newer core lets the browser write it", () => {
+  // The desktop app's bundled core validates every remote settings write against
+  // the volatile nodes of the loader row's Config schema and refuses the whole
+  // write otherwise (`Plugin entry "cost-balance-indicator" has no volatile
+  // fields`). `markVolatile` has to satisfy that check on a core that has
+  // `schema.volatile()` AND stay inert on the pinned 3.18.x schemastery, which
+  // has no such concept — either way `meta.volatile` is what the controller
+  // reads, and the schema itself must keep resolving exactly as before.
+  const pillColors = SettingsConfig.dict.pillColors;
+  assert.equal(pillColors.meta.volatile, true, "the colour section is the live-editable node");
+  // Only the colour section: ordinary configuration must stay out of the runtime form.
+  assert.notEqual(SettingsConfig.dict.autoCompact.meta.volatile, true);
+  // The marking is metadata only: parsing, defaults and JSON export are unchanged.
+  assert.equal(SettingsConfig({ pillColors: { mode: "single", all: { text: "#FF0000" } } }).pillColors.all.text, "#FF0000");
+  assert.equal(SettingsConfig({}).pillColors.mode, "all");
+  assert.equal(SettingsConfig.dict.pillColors.type, "object");
+  assert.ok(SettingsConfig.dict.pillColors.dict.all !== void 0, "the per-pill sections are still declared");
+  // The helper works on a core that only offers the meta flag...
+  const plain = { meta: {}, type: "object" };
+  assert.equal(markVolatile(plain), plain);
+  assert.equal(plain.meta.volatile, true);
+  // ...and prefers the real method when the installed schemastery has it, so the
+  // schema is cloned the way the library intends and validation still runs.
+  let called = 0;
+  const withMethod = {
+    meta: {},
+    type: "object",
+    volatile() {
+      called += 1;
+      return { ...this, meta: { ...this.meta, volatile: true } };
+    }
+  };
+  const marked = markVolatile(withMethod);
+  assert.equal(called, 1);
+  assert.equal(marked.meta.volatile, true);
+  assert.notEqual(marked, withMethod, "the library's own method returns its clone");
+  assert.equal(withMethod.meta.volatile, void 0, "the original schema is untouched");
+  // A schema that throws from `.volatile()` falls back to the meta flag instead
+  // of taking the whole plugin load down with it.
+  const hostile = { meta: {}, type: "object", volatile() { throw new TypeError("volatile schema is already wrapped"); } };
+  assert.equal(markVolatile(hostile), hostile);
+  assert.equal(hostile.meta.volatile, true);
+});
+
+test("the row Config IS the settings schema, so the app can list the namespace", () => {
+  // What the desktop app's bundled dsh-settings 0.2.x really does, in order: it
+  // walks the loader rows, keeps only those whose `entry.fiber.runtime.Config`
+  // (this plugin's exported Config) yields a volatile form, names the namespace
+  // after the row id — this plugin's name — and checks every written path with
+  // `isVolatilePath(rowConfig, path)`. Both walkers below are verbatim ports of
+  // `@deepseek-ai/dsh-settings/lib/types/schema.js` out of the app's asar.
+  const volatileForm = (schema) => {
+    if (schema.meta.volatile) return schema;
+    if (schema.type === "object") {
+      const dict = Object.fromEntries(Object.entries(schema.dict ?? {}).flatMap(([key, child]) => {
+        const field = volatileForm(child);
+        return field === void 0 ? [] : [[key, field]];
+      }));
+      return Object.keys(dict).length === 0 ? void 0 : z.object(dict);
+    }
+    return void 0;
+  };
+  const isVolatilePath = (schema, path) => {
+    if (schema.meta.volatile) return true;
+    const [key, ...rest] = path;
+    const child = key === void 0 ? void 0 : schema.dict?.[key];
+    return child !== void 0 && isVolatilePath(child, rest);
+  };
+  // One schema object for both roles. A separate settings schema was invisible to
+  // that core, which is exactly why the namespace was missing from
+  // `settings/describe` and every write answered `Plugin entry
+  // "cost-balance-indicator" has no volatile fields`.
+  assert.equal(plugin.Config, Config);
+  assert.equal(SettingsConfig, Config);
+  assert.equal(Config.dict.pillColors.meta.volatile, true, "the palette node of the ROW schema carries the marker");
+  assert.notEqual(volatileForm(Config), void 0, "the row therefore yields a live form and is listed");
+  assert.deepEqual(Object.keys(volatileForm(Config).dict), ["pillColors"], "only the live section is in that form");
+  for (const path of [["pillColors"], ["pillColors", "mode"], ["pillColors", "all", "text"], ["pillColors", "turnBalance", "background"]]) {
+    assert.equal(isVolatilePath(Config, path), true, `the app accepts a write to ${path.join(".")}`);
+  }
+  for (const path of [["autoCompact"], ["autoCompact", "contextBudget"], ["apiKey"], ["prices"], ["baseUrl"]]) {
+    assert.equal(isVolatilePath(Config, path), false, `ordinary configuration stays out of the runtime write: ${path.join(".")}`);
+  }
+  // Ordinary configuration is untouched by the marker.
+  assert.notEqual(Config.dict.autoCompact.meta.volatile, true);
+  assert.equal(Config({}).autoCompact.contextBudget, 100000);
+  assert.equal(Config({}).pillColors.mode, "all");
+  // Sharing one schema with the settings service must not hand the balance key to
+  // a core that still renders the registered schema as a form.
+  assert.equal(Config.dict.apiKey.meta.role, "secret");
+});
+
+test("the schema handed to settings.register is the loader row's own Config", async () => {
+  const { ctx, settingsRegistrations } = makeCtx();
+  await plugin.apply(ctx, Config({}));
+  assert.equal(settingsRegistrations.length, 1, "the 0.1.x register() path is still served");
+  assert.equal(settingsRegistrations[0].ns, "cost-balance-indicator", "the namespace is the plugin name");
+  assert.equal(settingsRegistrations[0].schema, plugin.Config, "the very object the loader row is given");
+  assert.equal(settingsRegistrations[0].options.applies, "live");
+});
+
+test("a core without settings.register (dsh-settings 0.2.x) still mounts every surface", async () => {
+  // The desktop app's bundled core dropped register()/watch(): it derives the
+  // namespace from the row Config instead. Calling the old method there threw
+  // inside the settings inject fiber, so the call is now guarded.
+  const { ctx, routes, projections, services } = makeCtx({ apiKey: "sk-test", settingsApi: "modern" });
+  await plugin.apply(ctx, Config({}));
+  assert.equal(projections.length, 1, "the peakCost projection is registered");
+  assert.equal(typeof services.deepseekBalance.read, "function");
+  assert.ok(routes.some((route) => route.path === "/api/deepseek.balance"));
 });
 
 test("live: reads the real DeepSeek key balance", async (t) => {
