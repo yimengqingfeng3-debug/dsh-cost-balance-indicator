@@ -2,6 +2,27 @@
 
 版本号遵循语义化版本；每个条目都是一次可复现的改动，配套 `npm test` 与 `verify/self-check.ps1`。
 
+## 0.7.2
+
+**修复桌面端「颜色无法保存」：用应用自己的设置 RPC 落盘**
+
+- **根因**：桌面端捆绑的客户端**没有 `settingsScope` 这个服务**（0.7.0 因此让应用启动失败，0.7.1 又把它降级成"只存浏览器本地"）。
+  实测它的设置界面走的是另一条路：在自己进程里 `super(ctx, "settingsSchema")`，并用
+  `ctx.remote.settings.describe() / mutate(ns, ops, expectedRevision)` 直接和主机通信。
+- **修复**：`bindColorScope` 现在先找 `settingsScope` 绑定器（CLI/网页版的路径，行为不变），
+  找不到就退化到**基于 `remote.settings` 的适配器**：`describe()` 读回本命名空间（含 `revision`）、
+  `mutate(ns, [{op:'set', path:['pillColors'], value}], revision)` 写回，主机拒绝时把
+  `settings/rejected` 之类的原因如实显示在覆盖栏；`settings/conflict`（revision 过期）会**重新读取后重试一次**。
+- **顺带修掉一个真 bug**：写成功后适配器会重新发布读回的值，颜色对象的引用因此改变，
+  而保存状态原来用**对象引用**判断"这次写入还是最新的"，于是会一直停在「保存中…」。
+  现在改用**编辑代次计数**（每次本地编辑 +1）判断，迟到的写入无法冒领「已保存」。
+- **新增 `verify/client-api.mjs`**：读**正在运行**的 DSH 客户端到底提供了什么
+  （`super(ctx,"name")` 服务表、`provide` 名称、`remote.*` 命名空间，或按关键词看上下文）。
+  这类"CLI 与桌面端内核不同"的坑就是靠它定位的——**猜 API 是 0.7.0 出事的根本原因**。
+- **测试 53 项**：新增「只有 remote.settings 时也能读回并写入配色（含 revision 栅栏）」、
+  「写入被拒会如实报错而不是吞掉」、「revision 冲突会重读并重试一次」、
+  「有 settingsScope 时优先用它，不走 RPC」。
+
 ## 0.7.1
 
 **修复 0.7.0 导致桌面端无法启动（`web boot: 1 entry did not activate`）**

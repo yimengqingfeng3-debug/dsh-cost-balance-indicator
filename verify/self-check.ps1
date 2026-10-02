@@ -397,27 +397,23 @@ if ($SkipDesktop) {
     Report 'desktop storages restored' $true 'snapshot put back'
   }
 
-  # The running app composed its profile at launch: until it is restarted once the
-  # plugin bundle is not served yet. That is a restart, not a defect.
+  # The running app composed its profile at launch: it either serves the plugin's
+  # browser half already, or it needs one restart. Its bundles are served as ONE
+  # combo URL per boot-page section, so the boot page is read and the combo that
+  # lists our client.js is fetched — a single-module URL answers 404 even when the
+  # plugin IS mounted.
   $appPort = Get-ListeningPortOf 'DeepSeek Harness'
   if ($appPort -eq $null) {
     ReportPending 'desktop app live mount' 'the desktop app is not running (start it and re-run to verify)'
   } else {
-    $appCode = $null
-    $appLength = 0
-    try {
-      $response = Invoke-WebRequest ("http://127.0.0.1:{0}/plugins/??dsh-cost-balance-indicator/client.js" -f $appPort) -UseBasicParsing -TimeoutSec 15
-      $appCode = $response.StatusCode
-      $appLength = $response.RawContentLength
-    } catch {
-      if ($_.Exception.Response -ne $null) { $appCode = $_.Exception.Response.StatusCode.value__ }
-    }
-    if ($appCode -eq 200) {
-      Report 'desktop app serves the plugin' $true ("port {0}, {1} bytes" -f $appPort, $appLength)
-    } elseif ($appCode -eq 404) {
+    $served = & node (Join-Path $PSScriptRoot 'app-serves-plugin.mjs') --port $appPort 2>&1
+    $line = ($served | Where-Object { $_ -match '^served:' } | Select-Object -First 1) -as [string]
+    if ($line -match '^served: 200 (\d+) bytes') {
+      Report 'desktop app serves the plugin' $true ("port {0}, {1} bytes" -f $appPort, $Matches[1])
+    } elseif ($line -match 'absent') {
       ReportPending 'desktop app live mount' ("port {0}: restart the app once; the profile is composed at launch" -f $appPort)
     } else {
-      ReportPending 'desktop app live mount' ("port {0} answered {1}" -f $appPort, $appCode)
+      ReportPending 'desktop app live mount' ("port {0}: {1}" -f $appPort, ($line -as [string]))
     }
   }
 }

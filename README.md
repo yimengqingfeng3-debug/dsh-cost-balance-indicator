@@ -40,7 +40,7 @@
 | 12 | 兼容性修复 | — | `settingsNamespace` 垫片（core 0.1.2+ 不再导出）；皮肤 `corner-shape: superellipse` 下强制轮盘正圆；`background` 简写会重置 `background-clip`；写设置为 `set/mutate` 而非 `write` |
 | 13 | 安装 / 换装 | 手动编辑 patch 文件 | `install.ps1`：复制 → 挂载 → 退役旧行，**两段式**写入避开热重载竞态；`-Uninstall` 回退 |
 | 14 | 自检与可视化 | — | `verify/self-check.ps1`（19 项，含冷启动）、`shot.mjs`（真浏览器截图/悬停）、`boot-graph.mjs`（启动图核对） |
-| 15 | 测试 | 无 | **49 项**（主机 17 + 浏览器 32），含一次真实余额读取 |
+| 15 | 测试 | 无 | **53 项**（主机 17 + 浏览器 36），含一次真实余额读取 |
 | 16 | 桌面端（Electron） | 不支持：应用私有 profile 与 CLI 的 `web` 是两套组合 | `install.ps1 -Profile desktop` 一键装进应用私有 profile；自检第 6 节用同组合探针实例验证；桌面端已实测四枚胶囊与余额读取 |
 | 17 | 新内核兼容 | 4 个服务全是硬依赖，缺一个就卡在 `pending`；slot 注册一处失败即整半部失效 | 只有 `sessionProjections` 是硬依赖，其余走 `ctx.inject` 子纤程按需挂载；六个 slot 逐个独立注册 |
 
@@ -58,6 +58,16 @@ pwsh -File verify/self-check.ps1             # 第 6 节会检查桌面端
 - **首次安装要重启一次应用**：应用在**启动时**组合 profile，正在运行的实例不会看到新行
   （自检如实报 `[WAIT] desktop app live mount`，不算失败）。安装脚本会同时把
   `dsh.profile.patchReload` 设为 `live`，所以**此后的修改（含以后升级插件）无需再重启**。
+- **配色在桌面端怎么落盘**：桌面端**捆绑的客户端与 CLI 不是同一套 API**——它没有
+  `settingsScope` 绑定器，而是提供 `settingsSchema`，并让设置界面直接调用
+  `ctx.remote.settings.describe() / mutate(ns, ops, expectedRevision)`。
+  本插件的 `bindColorScope` 因此先找绑定器（CLI/网页版路径），找不到就退化到
+  **基于 `remote.settings` 的适配器**：读回本命名空间（含 `revision`）、用 `mutate` 写回 `pillColors`，
+  被拒时把原因显示在覆盖栏，`settings/conflict` 会重读后重试一次。
+  若两者都没有，才退回「只存浏览器本地」并如实提示。
+- **不确定对方内核提供什么？别猜**：`node verify/client-api.mjs --port 19387`
+  会读出**正在运行**的客户端到底有什么（服务表、`provide` 名称、`remote.*` 命名空间）。
+  `--grep settings` 还能打印关键词上下文。CLI 与桌面端内核不同，这个工具就是为此准备的。
 - **自检怎么验证它**：`self-check.ps1` 第 6 节把 `desktop` profile 复制成 `desktop-probe`
   （保留同一份 `dsh.profile.bundles`：`dsh-base` + `dsh-web-app` + 本插件行），用 CLI 在空闲端口起探针实例，
   校验余额路由、启动图与客户端包（6 个组件），跑完拆掉并还原 `storages`；最后访问**正在运行的应用**自己的端口，
@@ -283,7 +293,7 @@ pwsh -File install.ps1 -SettleSeconds 8     # 机器慢 / profile 大时放宽�
 ## 测试与验证
 
 ```powershell
-npm test                                        # 49 项：主机 17 + 浏览器 32，含一次真实余额读取
+npm test                                        # 53 项：主机 17 + 浏览器 36，含一次真实余额读取
 pwsh -File verify/self-check.ps1                # 一键自检：组成树 / open_dsh / 冷启动 / 运行中实例
 node verify/check-cost-balance.mjs              # 真实实例端到端探针
 node verify/check-cost-balance.mjs --port 51185 # 指定端口（换端口要换 cookie 受众）
@@ -349,13 +359,13 @@ curl 分不清「路由没挂」和「没登录」。它用凭证库里的 `clie
 ## 打包（已完成，未发布）
 
 ```powershell
-npm run pack        # -> dist/dsh-cost-balance-indicator-0.7.1.tgz
+npm run pack        # -> dist/dsh-cost-balance-indicator-0.7.2.tgz
 ```
 
 发布到 GitHub / npm 的步骤（**本次未执行**，你确认后再跑）：
 
 ```powershell
-git init; git add -A; git commit -m "dsh-cost-balance-indicator 0.7.1"
+git init; git add -A; git commit -m "dsh-cost-balance-indicator 0.7.2"
 gh repo create dsh-cost-balance-indicator --public --source . --push
 npm publish --access public     # 需先 npm login；包名 dsh-cost-balance-indicator 在 npm 上未被占用
 ```

@@ -887,6 +887,132 @@ test("the save path follows the client's own scope API", async () => {
   }
 });
 
+/** A client whose only settings surface is the `remote.settings` RPC, like the desktop app. */
+function remoteOnlyCtx(document = {}, options = {}) {
+  const registrations = [];
+  const mutations = [];
+  const state = { revision: options.revision ?? 7, section: document };
+  const ctx = {
+    effect: (callback) => { callback(); return () => {}; },
+    locale: { register: () => () => {} },
+    logger: { warn: () => {} },
+    slots: {
+      inject: (name, callback) => callback(),
+      register: (options2, component) => { registrations.push({ options: options2, component }); return () => {}; }
+    },
+    remote: {
+      settings: {
+        describe: () => Promise.resolve({
+          ok: true,
+          value: {
+            writable: true,
+            hasDocument: true,
+            namespaces: [{ ns: "cost-balance-indicator", value: state.section, revision: state.revision }]
+          }
+        }),
+        mutate: (ns, ops, revision) => {
+          mutations.push({ ns, ops, revision });
+          if (options.refuse === true) {
+            return Promise.resolve({ ok: false, error: { code: "settings/rejected", message: "read-only provider" } });
+          }
+          if (options.conflictOnce === true && mutations.length === 1) {
+            state.revision += 1;
+            return Promise.resolve({ ok: false, error: { code: "settings/conflict", message: "stale revision", details: { ns, expected: revision, actual: state.revision } } });
+          }
+          for (const op of ops) state.section = { ...state.section, [op.path[0]]: op.value };
+          state.revision += 1;
+          return Promise.resolve({ ok: true, value: { ns, value: state.section, revision: state.revision } });
+        }
+      }
+    }
+  };
+  return { ctx, registrations, mutations, state };
+}
+
+const DARK_PALETTE = {
+  mode: "all",
+  all: { text: "#C6D0F5", border: "#626880", background: "#414559" }
+};
+
+test("the desktop's settings RPC persists colours when there is no scope binder", async () => {
+  const exports = loadBundle();
+  const storage = fakeStorage();
+  globalThis.localStorage = storage;
+  try {
+    // Exactly the desktop shape: no settingsScope service, only remote.settings.
+    const { ctx, mutations, state } = remoteOnlyCtx({ pillColors: DARK_PALETTE });
+    exports.apply(ctx);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Read path: the document's palette is adopted on load.
+    assert.equal(exports.colorStore.getSnapshot().colors.all.background, "#414559");
+    // Write path: an edit goes through mutate(ns, ops, revision).
+    exports.colorStore.setColor("all", "background", "#123456");
+    await exports.colorStore.saveNow();
+    assert.equal(mutations.length, 1);
+    assert.equal(mutations[0].ns, "cost-balance-indicator");
+    assert.deepEqual(mutations[0].ops, [{ op: "set", path: ["pillColors"], value: state.section.pillColors }]);
+    assert.equal(mutations[0].revision, 7, "the revision read from describe fences the write");
+    assert.equal(exports.colorStore.getSnapshot().save.status, "saved");
+    assert.equal(state.section.pillColors.all.background, "#123456");
+  } finally {
+    delete globalThis.localStorage;
+  }
+});
+
+test("a refused settings write is reported, not swallowed", async () => {
+  const exports = loadBundle();
+  const storage = fakeStorage();
+  globalThis.localStorage = storage;
+  try {
+    const { ctx } = remoteOnlyCtx({ pillColors: DARK_PALETTE }, { refuse: true });
+    exports.apply(ctx);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    exports.colorStore.setColor("all", "text", "#FF0000");
+    await exports.colorStore.saveNow();
+    const save = exports.colorStore.getSnapshot().save;
+    assert.equal(save.status, "error");
+    assert.match(save.message, /settings\/rejected: read-only provider/);
+    assert.ok(storage.map.has(STORAGE_KEY), "the browser copy keeps the palette meanwhile");
+  } finally {
+    delete globalThis.localStorage;
+  }
+});
+
+test("a stale revision re-reads and retries once", async () => {
+  const exports = loadBundle();
+  const storage = fakeStorage();
+  globalThis.localStorage = storage;
+  try {
+    const { ctx, mutations } = remoteOnlyCtx({ pillColors: DARK_PALETTE }, { conflictOnce: true });
+    exports.apply(ctx);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    exports.colorStore.setColor("all", "background", "#abcdef");
+    await exports.colorStore.saveNow();
+    assert.equal(mutations.length, 2, "one refused attempt, then one retry");
+    assert.equal(mutations[0].revision, 7);
+    assert.equal(mutations[1].revision, 8, "the retry carries the refreshed revision");
+    assert.equal(exports.colorStore.getSnapshot().save.status, "saved");
+  } finally {
+    delete globalThis.localStorage;
+  }
+});
+
+test("a bound scope is preferred over the settings RPC", async () => {
+  const exports = loadBundle();
+  const scope = fakeScope();
+  const registered = [];
+  exports.apply({
+    effect: (callback) => { callback(); return () => {}; },
+    locale: { register: () => () => {} },
+    slots: { inject: (name, callback) => callback(), register: (options, component) => { registered.push(options); return () => {}; } },
+    settingsScope: { bind: (spec) => { assert.equal(spec.namespace, "cost-balance-indicator"); return scope; } },
+    remote: { settings: { describe: () => { throw new Error("must not be used"); }, mutate: () => { throw new Error("must not be used"); } } }
+  });
+  exports.colorStore.setColor("all", "background", "#0f0f0f");
+  await exports.colorStore.saveNow();
+  assert.equal(scope.writes.length, 1, "the binder handled the write");
+});
+
 test("a client without settingsScope or modelDirectories still mounts the pills", () => {
   // This is the exact shape of the desktop shell's bundled client, and the reason
   // the required services were cut to `slots` + `locale`: the app aborts its whole
