@@ -96,6 +96,14 @@ pwsh -File verify/self-check.ps1             # 第 6 节会检查桌面端
   包内改用 `ctx.inject(["slots"], …)` 等待**服务**（服务等待跨内核可移植，模块 id 不是）。
   想自查正在运行的实例：`node verify/boot-entry.mjs --port 19387`，
   它会打印本插件自己的启动图条目，并把缺失的依赖标成 `*** MISSING from graph ***`。
+- **⚠️ 更新/安装时先退出应用，或准备好立刻重启**：管理器是往**正在运行**的应用里装的，而
+  `dsh.profile.patchReload: live` 会让应用**立刻**重组合并去 import 新包；这一刻文件还没写完的话，
+  就会报 `dsh-cost-balance-indicator: import failed`，应用**中止启动**并弹「应用无法启动或已意外停止」。
+  **包本身没问题**（自检会给它判 `[WAIT] … 重启应用`，而不是 FAIL）——重启一次即可。
+  想彻底避开这个赛跑：更新前先退出应用，或更新完立刻重启。
+- **⚠️ 别让这一行被禁用**：应用启动失败时会提供「禁用第三方插件」按钮，它会往 profile patch 写入
+  `- id: cost-balance-indicator` + `disabled: true`。被禁用的行**不会**参与组合——没有路由、没有客户端模块、
+  也没有任何报错，表现就是"启用了却什么都不出现"。自检的 `desktop patch: plugin not disabled` 专门盯这个。
 - **自检怎么验证它**：`self-check.ps1` 第 6 节把 `desktop` profile 复制成 `desktop-probe`
   （保留同一份 `dsh.profile.bundles`：`dsh-base` + `dsh-web-app` + 本插件行），用 CLI 在空闲端口起探针实例，
   校验余额路由、启动图与客户端包（6 个组件），跑完拆掉并还原 `storages`；最后访问**正在运行的应用**自己的端口，

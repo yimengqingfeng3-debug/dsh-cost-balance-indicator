@@ -284,6 +284,12 @@ if ($SkipDesktop) {
   Report 'desktop manifest: patchReload live' $liveReload $(if ($liveReload) { 'later edits recompose without a restart' } else { 'add dsh.profile.patchReload: live' })
   $peakDisabled = ([regex]::Matches($desktopPatchText, '(?m)^\s*-?\s*id: peak-indicator\s*$')).Count
   Report 'desktop patch: no legacy rows' ($peakDisabled -eq 0) "peak-indicator rows=$peakDisabled"
+  # A `disabled: true` override on OUR row keeps it out of the composition entirely:
+  # no host route, no client module, no pills — and no error either, because a
+  # disabled row is not a pending one. This is what the app's boot-failure dialog
+  # writes when the user asks it to disable third-party plugins.
+  $selfDisable = ([regex]::Matches($desktopPatchText, '(?ms)^- id: cost-balance-indicator\s*\n(?:[^\n-].*\n?)*?\s*disabled:\s*true')).Count
+  Report 'desktop patch: plugin not disabled' ($selfDisable -eq 0) $(if ($selfDisable -eq 0) { 'no disabled override for this row' } else { 'disabled: true keeps the row out of the composition' })
 
   # Neither half may require a service. A pending entry aborts the desktop app's
   # whole boot (`web boot: 1 entry did not activate`), which is exactly how 0.7.0
@@ -317,6 +323,13 @@ if ($SkipDesktop) {
 
   # A boot crash that names this plugin is the app telling us it refused to start.
   # Only crashes NEWER than the installed client.js count: an older one is fixed.
+  #
+  # Two very different causes reach this log, and they need different answers:
+  #   * `pending (waiting for service …)` — a real dependency defect in the package
+  #     (0.7.0/0.7.1/0.7.2 all failed this way). That is a FAIL.
+  #   * `import failed` — the app live-recomposed while the install was still
+  #     writing the new bundle (the plugin manager installs into the RUNNING app).
+  #     The package is fine; the app just needs one restart. That is a WAIT.
   $appLogs = Join-Path $env:APPDATA '@deepseek-ai\dsh-desktop\logs'
   if (Test-Path $appLogs) {
     $clientStamp = (Get-Item $clientPath -ErrorAction SilentlyContinue).LastWriteTime
@@ -328,8 +341,13 @@ if ($SkipDesktop) {
     } elseif ($clientStamp -ne $null -and $ours[0].LastWriteTime -lt $clientStamp) {
       Report 'desktop crash logs mention us' $true ("last one {0:MM-dd HH:mm} predates the installed build" -f $ours[0].LastWriteTime)
     } else {
-      $first = (Get-Content $ours[0].FullName | Where-Object { $_ -match 'pending|did not activate' } | Select-Object -First 1)
-      Report 'desktop crash logs mention us' $false ("{0}: {1}" -f $ours[0].Name, ($first -as [string]).Trim())
+      $crashText = Get-Content $ours[0].FullName -Raw
+      $pendingLine = (Get-Content $ours[0].FullName | Where-Object { $_ -match 'pending \(waiting for service' } | Select-Object -First 1)
+      if ($crashText -match 'import failed' -and $pendingLine -eq $null) {
+        ReportPending 'desktop boot crash: install race' ("{0}: the app imported the bundle while the install was still writing it — restart the app" -f $ours[0].Name)
+      } else {
+        Report 'desktop crash logs mention us' $false ("{0}: {1}" -f $ours[0].Name, ($pendingLine -as [string]).Trim())
+      }
     }
   }
 
