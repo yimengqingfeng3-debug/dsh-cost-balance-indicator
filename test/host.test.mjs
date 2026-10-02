@@ -18,11 +18,16 @@ import { join } from "node:path";
 
 import plugin, {
   BALANCE_PATH,
+  CN_HOLIDAYS_2026,
   Config,
+  DEEPSEEK_LOGIN_URL,
+  DEEPSEEK_TOP_UP_URL,
   SettingsConfig,
+  balanceLinks,
   createBalanceReader,
   createPeakCostProjection,
   currentPeriod,
+  isCnHoliday,
   normalizeBalanceConfig,
   parseBalancePayload,
   periodAt,
@@ -137,6 +142,24 @@ test("period and price resolution follow the official policy", () => {
   assert.equal(currentPeriod(new Date(Date.UTC(2026, 8, 18, 2, 0, 0)), config).period, "peak");
 });
 
+test("the host bills statutory holidays as off-peak, exactly like the browser half", () => {
+  const config = Config({});
+  // Official 2026 安排 (国办发明电〔2025〕7号): National Day off days are 10-01…10-07.
+  assert.equal(CN_HOLIDAYS_2026.length, 33);
+  assert.equal(CN_HOLIDAYS_2026.includes("2026-10-08"), false, "10-08 is an ordinary working Thursday");
+  // Friday 2026-10-02 10:00 Beijing would be peak on an ordinary weekday.
+  assert.equal(currentPeriod(new Date(Date.UTC(2026, 9, 2, 2, 0, 0)), config).period, "offpeak");
+  assert.equal(periodAt(Date.UTC(2026, 9, 2, 2, 0, 0), config), "offpeak");
+  assert.equal(isCnHoliday(new Date(Date.UTC(2026, 9, 2, 2, 0, 0))), true);
+  // The day after the run ends is back to peak.
+  assert.equal(periodAt(Date.UTC(2026, 9, 8, 2, 0, 0), config), "peak");
+  assert.equal(isCnHoliday(new Date(Date.UTC(2026, 9, 8, 2, 0, 0))), false);
+  // The Spring Festival run and a May Day weekday behave the same.
+  assert.equal(periodAt(Date.UTC(2026, 1, 17, 2, 0, 0), config), "offpeak");
+  assert.equal(periodAt(Date.UTC(2026, 4, 4, 2, 0, 0), config), "offpeak");
+  assert.equal(periodAt(Date.UTC(2026, 3, 30, 2, 0, 0), config), "peak");
+});
+
 test("the peakCost projection folds usage at the period of each event", () => {
   const config = Config({});
   const projection = createPeakCostProjection(config);
@@ -175,9 +198,11 @@ test("one apply mounts the projection, the settings section and the balance rout
   assert.equal(projections.length, 1);
   assert.equal(projections[0].key, "peakCost");
   assert.equal(projections[0].stateVersion, 5);
-  assert.equal(routes.length, 1);
-  assert.equal(routes[0].path, BALANCE_PATH);
-  assert.deepEqual(routes[0].methods, ["GET"]);
+  // Two routes now: the balance endpoint plus the browser half's diagnostics channel.
+  const balanceRoute = routes.find((route) => route.path === BALANCE_PATH);
+  assert.ok(balanceRoute !== void 0, "the balance route is mounted");
+  assert.deepEqual(balanceRoute.methods, ["GET"]);
+  assert.ok(routes.some((route) => route.path === "/api/cost-balance-indicator.diag"), "the diagnostics route is mounted");
   assert.equal(typeof services.deepseekBalance.read, "function");
 });
 
@@ -260,6 +285,10 @@ test("the route answers the balance, caches it, and honors force", async () => {
     assert.equal(first.source, "credentials/managed:DEEPSEEK_API_KEY");
     assert.equal(first.lowBalanceThreshold, 5);
     assert.equal(first.cached, false);
+    // The top-up/sign-in links follow the CONFIGURED endpoint, not the official
+    // one: a private gateway gets its own root.
+    assert.equal(first.topUpUrl, `${mock.baseUrl}/`);
+    assert.equal(first.loginUrl, `${mock.baseUrl}/`);
     assert.equal(mock.hits.count, 1);
     const second = await (await route.fetch(new Request(`http://127.0.0.1:3080${BALANCE_PATH}`))).json();
     assert.equal(second.cached, true);
@@ -306,6 +335,9 @@ test("a missing key and an HTTP failure both report a readable error", async () 
   const missing = await (await noKey.routes[0].fetch(new Request(`http://127.0.0.1:3080${BALANCE_PATH}`))).json();
   assert.equal(missing.ok, false);
   assert.match(missing.error, /DSH_BALANCE_ABSENT_KEY/);
+  // A failed read still carries both links, so the overlay's 充值 shortcut works.
+  assert.equal(missing.topUpUrl, "http://127.0.0.1:1/");
+  assert.equal(missing.loginUrl, "http://127.0.0.1:1/");
 
   const mock = await startMock((request, response) => {
     response.writeHead(401, { "content-type": "application/json" });
@@ -317,9 +349,24 @@ test("a missing key and an HTTP failure both report a readable error", async () 
     const denied = await (await routes[0].fetch(new Request(`http://127.0.0.1:3080${BALANCE_PATH}`))).json();
     assert.equal(denied.ok, false);
     assert.match(denied.error, /HTTP 401/);
+    assert.equal(denied.topUpUrl, `${mock.baseUrl}/`);
+    assert.equal(denied.loginUrl, `${mock.baseUrl}/`);
   } finally {
     await mock.stop();
   }
+});
+
+test("the official endpoint gets the DeepSeek console pages", async () => {
+  assert.deepEqual(balanceLinks("https://api.deepseek.com"), { topUpUrl: DEEPSEEK_TOP_UP_URL, loginUrl: DEEPSEEK_LOGIN_URL });
+  assert.deepEqual(balanceLinks("https://deepseek.com"), { topUpUrl: DEEPSEEK_TOP_UP_URL, loginUrl: DEEPSEEK_LOGIN_URL });
+  // Not DeepSeek's host: the gateway's own root, unchanged scheme and port.
+  assert.deepEqual(balanceLinks("http://192.168.1.9:8080/v1"), { topUpUrl: "http://192.168.1.9:8080/", loginUrl: "http://192.168.1.9:8080/" });
+  // The no-key path of the real reader (no network involved) carries them too.
+  const reader = createBalanceReader({}, normalizeBalanceConfig({ apiKeyEnv: "DSH_BALANCE_ABSENT_KEY" }));
+  const payload = await reader.read(false);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.topUpUrl, DEEPSEEK_TOP_UP_URL);
+  assert.equal(payload.loginUrl, DEEPSEEK_LOGIN_URL);
 });
 
 test("resolveApiKey prefers config, then the environment, then the store", async () => {
@@ -371,7 +418,7 @@ test("a core without settings, loader or token meter still gets the pills and th
   await plugin.apply(ctx, Config({}));
   assert.equal(projections.length, 1, "the peakCost projection is registered");
   assert.equal(typeof services.deepseekBalance.read, "function", "the balance service exists");
-  assert.equal(routes.length, 1, "the balance route is mounted");
+  assert.ok(routes.some((route) => route.path === "/api/deepseek.balance"), "the balance route is mounted");
   assert.equal(services.peakCompactStats, void 0, "no compaction tracking without a loader");
 });
 

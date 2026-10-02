@@ -650,28 +650,33 @@ test("the overlay offers the default, dark and light presets", () => {
   assert.equal(buttons[0].props["aria-pressed"], true);
   assert.equal(buttons[1].props["aria-pressed"], false);
   assert.equal(exports.PILL_PRESETS[0].colors, null, "the default preset carries no colours");
-  assert.match(buttons[1].props.title, /Frapp/);
-  assert.match(buttons[2].props.title, /Latte/);
+  // The tooltips name the app's own theme, not the old catppuccin skin; both
+  // dictionaries (zh and en) carry the same hexes.
+  assert.match(buttons[1].props.title, /DSH/);
+  assert.match(buttons[1].props.title, /#2C2C2E/);
+  assert.match(buttons[2].props.title, /DSH/);
+  assert.match(buttons[2].props.title, /#F5F6F7/);
 
-  // The two themed presets are the skin's own surfaces, so a pill drawn with
-  // them reads as native in each mode (catppuccin Frappé / Latte).
-  assert.deepEqual({ ...exports.PILL_PRESETS[1].colors }, { text: "#C6D0F5", border: "#626880", background: "#414559" });
-  assert.deepEqual({ ...exports.PILL_PRESETS[2].colors }, { text: "#4C4F69", border: "#BCC0CC", background: "#EFF1F5" });
+  // The two themed presets are the DSH desktop app's own surfaces
+  // (--dsw-alias-label-primary / --dsw-alias-bg-layer-2 for dark, ...-bg-module-platform
+  // and --dsw-static-neutral-bluish-800 for the light background and both borders).
+  assert.deepEqual({ ...exports.PILL_PRESETS[1].colors }, { text: "#F9FAFB", border: "#353638", background: "#2C2C2E" });
+  assert.deepEqual({ ...exports.PILL_PRESETS[2].colors }, { text: "#0F1115", border: "#E1E5EE", background: "#F5F6F7" });
 
   // Applying one writes the whole scope and moves the highlight.
   buttons[1].props.onClick();
   const written = scope.writes[scope.writes.length - 1].value;
-  assert.equal(written.all.background, "#414559");
-  assert.equal(written.all.text, "#C6D0F5");
-  assert.equal(written.all.border, "#626880");
+  assert.equal(written.all.background, "#2C2C2E");
+  assert.equal(written.all.text, "#F9FAFB");
+  assert.equal(written.all.border, "#353638");
   const after = presetsOf(renderPanel());
   assert.equal(after[1].props["aria-pressed"], true, "the dark preset becomes active");
   assert.equal(after[0].props["aria-pressed"], false);
   // …and the pills really take the preset colours.
   const pills = renderFour(exports, mounted);
-  assert.equal(pills.turnBalance.props.style.background, "#414559");
-  assert.equal(pills.turnCost.props.style.color, "#C6D0F5");
-  assert.equal(pills.headerBalance.props.style.border, "1px solid #626880");
+  assert.equal(pills.turnBalance.props.style.background, "#2C2C2E");
+  assert.equal(pills.turnCost.props.style.color, "#F9FAFB");
+  assert.equal(pills.headerBalance.props.style.border, "1px solid #353638");
 
   // Clicking 默认 is exactly the old reset: nothing custom anywhere.
   after[0].props.onClick();
@@ -692,13 +697,13 @@ test("a preset follows the mode switch: all four, or only the hovered pill", () 
     resolved
   });
   collect(renderPanel()).find((node) => node.props["data-cost-balance-preset"] === "light").props.onClick();
-  assert.equal(scope.writes[scope.writes.length - 1].value.all.background, "#EFF1F5");
+  assert.equal(scope.writes[scope.writes.length - 1].value.all.background, "#F5F6F7");
   // Switch to "single" and the same preset lands on the hovered pill only.
   exports.colorStore.setMode("single");
   collect(renderPanel()).find((node) => node.props["data-cost-balance-preset"] === "dark").props.onClick();
   const colors = exports.colorStore.getSnapshot().colors;
-  assert.equal(colors.turnBalance.background, "#414559");
-  assert.equal(colors.all.background, "#EFF1F5", "the global preset is untouched");
+  assert.equal(colors.turnBalance.background, "#2C2C2E");
+  assert.equal(colors.all.background, "#F5F6F7", "the global preset is untouched");
   assert.equal(exports.colorStore.activePreset("turnBalance"), "dark");
 });
 
@@ -1013,6 +1018,36 @@ test("a bound scope is preferred over the settings RPC", async () => {
   assert.equal(scope.writes.length, 1, "the binder handled the write");
 });
 
+test("a namespaced service that refuses uninjected reads never aborts the mount", () => {
+  // The desktop app's exact failure: `remote.settings` is namespaced, so Cordis
+  // throws `cannot get property "remote.settings" without inject` when the RPC
+  // backend is built off the plain plugin context. That throw escaped the mount and
+  // left the app with ZERO registered pills — and no error dialog, because the
+  // client entry itself activated fine.
+  const exports = loadBundle();
+  const registrations = [];
+  const warnings = [];
+  const ctx = {
+    effect: (callback) => { callback(); return () => {}; },
+    locale: { register: () => () => {} },
+    logger: { warn: (message) => warnings.push(message) },
+    slots: {
+      inject: (name, callback) => callback(),
+      register: (options, component) => { registrations.push(options); return () => {}; }
+    },
+    get remote() {
+      throw new Error('cannot get property "remote.settings" without inject');
+    }
+  };
+  exports.apply(ctx);
+  assert.deepEqual(registrations.map((options) => options.id).sort(), [
+    "cost-balance-indicator-balance",
+    "cost-balance-indicator-header",
+    "cost-balance-indicator-peak",
+    "cost-balance-indicator-turn"
+  ], "the four pills still mount");
+});
+
 test("a client without settingsScope or modelDirectories still mounts the pills", () => {
   // This is the exact shape of the desktop shell's bundled client, and the reason
   // the required services were cut to `slots` + `locale`: the app aborts its whole
@@ -1136,4 +1171,54 @@ test("the shared balance store polls at most once per minute", async () => {
     globalThis.setInterval = originalSetInterval;
     delete globalThis.fetch;
   }
+});
+
+// ------------------------------------------------- statutory holidays ------
+
+test("the browser half bills statutory holidays as off-peak all day", () => {
+  const exports = loadBundle();
+  // The official 2026 安排 (国办发明电〔2025〕7号): National Day runs 10-01…10-07,
+  // so 10-08 is an ordinary Thursday and must stay peak at 10:00 Beijing.
+  assert.equal(exports.currentPeriod(new Date("2026-10-08T02:00:00Z")), "peak");
+  // Friday 2026-10-02 10:00 Beijing is inside the holiday: off-peak all day.
+  assert.equal(exports.currentPeriod(new Date("2026-10-02T02:00:00Z")), "offpeak");
+  assert.equal(exports.isCnHoliday(new Date("2026-10-02T02:00:00Z")), true);
+  assert.equal(exports.isCnHoliday(new Date("2026-10-08T02:00:00Z")), false);
+  // Every official off day is listed, and the array carries no extra date.
+  assert.equal(exports.CN_HOLIDAYS_2026.length, 33);
+  assert.equal(exports.CN_HOLIDAYS_2026.includes("2026-10-08"), false);
+  // A mid-week holiday at 10:00 Beijing — peak on any ordinary weekday.
+  assert.equal(exports.currentPeriod(new Date("2026-05-04T02:00:00Z")), "offpeak");
+  // 04-30, the Thursday before the May Day run, is an ordinary working day.
+  assert.equal(exports.currentPeriod(new Date("2026-04-30T02:00:00Z")), "peak");
+});
+
+// ---------------------------------------------------- top-up / sign-in URL ---
+
+test("the top-up link follows the endpoint the host resolved", () => {
+  const exports = loadBundle();
+  const mounted = mount(exports);
+  const resolved = { text: "#0f7b3d", border: "#7fd6a8", background: "#d9f2e2" };
+  const hrefFor = (data) => {
+    const original = exports.balanceStore.getSnapshot;
+    exports.balanceStore.getSnapshot = () => ({ status: "ready", error: null, data });
+    try {
+      const links = collect(exports.PillColorPanel({
+        t: mounted.t(exports.NS_BALANCE),
+        pillKey: "headerBalance",
+        tip: "tip",
+        anchor: { top: 0, left: 0 },
+        resolved
+      })).filter((node) => node.type === "a");
+      assert.equal(links.length, 1);
+      return links[0].props.href;
+    } finally {
+      exports.balanceStore.getSnapshot = original;
+    }
+  };
+  // The host hands back the endpoint's own pages …
+  assert.equal(hrefFor({ ok: true, totalBalance: 32.65, topUpUrl: "https://gw.example.com/top_up", loginUrl: "https://gw.example.com/sign_in" }), "https://gw.example.com/top_up");
+  // … and the official page is the fallback while no payload carries one.
+  assert.equal(hrefFor(void 0), "https://platform.deepseek.com/top_up");
+  assert.equal(hrefFor({ ok: false, error: "no key" }), "https://platform.deepseek.com/top_up");
 });
