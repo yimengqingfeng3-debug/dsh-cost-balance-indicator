@@ -46,7 +46,27 @@
 
 ## 桌面端（DSH Desktop / Electron）
 
-桌面端用的是**应用私有 profile** `desktop`，与 CLI 的 `web` profile 是两套组合，插件要分别装：
+桌面端用的是**应用私有 profile** `desktop`，与 CLI 的 `web` profile 是两套组合，插件要分别装。
+
+**方式一：应用自带的「插件」页**（推荐，装完即被管理器接管，含升级）
+
+输入框接受**三种**写法（应用自带引导原文：`插件包名即 npm 包名（如 dsh-xxx 或 @作者/插件名）`）：
+
+| 写法 | 例子 | 说明 |
+| --- | --- | --- |
+| 包名 | `dsh-cost-balance-indicator` | 走 npm；本包已发布，可直接填 |
+| GitHub 地址 | `https://github.com/yimengqingfeng3-debug/dsh-cost-balance-indicator` | 仓库已提交构建产物 `lib/`，**无需构建步骤**，实测 `npm install <该地址>` 直接成功 |
+| 本地目录 | `<本包所在目录>` | 最快，但绑死该目录 |
+
+> ⚠️ **两种挂载方式只能留一种**：手工补丁行（`install.ps1`）与插件管理器的
+> `dsh.profile.bundles` 条目都会挂载同一个 loader id，**同时存在会让应用启动失败**（重复条目）。
+> 从手工方式换到管理器方式时，先撤掉手工那套：
+> ```powershell
+> pwsh -File install.ps1 -Profile desktop -Uninstall   # 移除补丁行与 node_modules 副本（patch 有备份）
+> ```
+> 自检第 6 节会检查「补丁行 / bundles 条目」**二选一**，同时存在即 FAIL。
+
+**方式二：安装脚本**
 
 ```powershell
 pwsh -File install.ps1 -Profile desktop      # 装进桌面端

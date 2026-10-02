@@ -28,6 +28,17 @@
     "pricing"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yimengqingfeng3-debug/dsh-cost-balance-indicator.git"
+  },
+  "homepage": "https://github.com/yimengqingfeng3-debug/dsh-cost-balance-indicator#readme",
+  "bugs": {
+    "url": "https://github.com/yimengqingfeng3-debug/dsh-cost-balance-indicator/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=22.13.0"
   },
@@ -43,7 +54,8 @@
     "compatibility": {
       "dsh": ">=0.1.0-rc.7",
       "profiles": [
-        "web"
+        "web",
+        "desktop"
       ]
     },
     "client": {
