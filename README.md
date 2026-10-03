@@ -129,6 +129,97 @@ pwsh -File verify/self-check.ps1             # 第 6 节会检查桌面端
 - **凭据**：桌面端与 CLI 共用同一个 `DSH_HOME`（`~/.dsh`），密钥按
   `config.apiKey` → 环境变量 → `ctx.credentials` 解析，始终留在主机侧。
 
+## 卸载（不想用了怎么删干净）
+
+**走的哪条安装路，就用哪条卸载路，别混用。** 两条路都实测过：卸完 profile 照常启动，
+本插件的路由、启动图条目、设置命名空间全部消失，日志里只剩启动 URL 一行。
+
+### 方式一：管理器装的 → 在应用「插件」页里卸载
+
+管理器卸载做三件事（本仓库在 %TEMP% 里复制真实桌面 profile 成 `desktop-probe-manager` 实测，
+DSH `0.1.5-rc.1`，2026-10-03）：
+
+1. 删掉 `package.json` 的 `dependencies` 条目；
+2. 从 `dsh.profile.bundles` 里去掉 `dsh-cost-balance-indicator`；
+3. 删掉 `<profile>\node_modules\dsh-cost-balance-indicator`（`.pnpm` 里有对应条目时一并删）。
+
+| | 卸载前（对照） | 管理器卸载后 |
+| --- | --- | --- |
+| 启动日志 | `dsh web: http://127.0.0.1:53288/?token=…`（仅 1 行） | `dsh web: http://127.0.0.1:53843/?token=…`（仅 1 行） |
+| 余额路由 | `GET /api/deepseek.balance -> 200`（真读到 ¥85.07） | `-> 404`，而对照路由 `GET /api/present.host -> 200` |
+| 启动图 | `present  dsh-cost-balance-indicator` | 三行全 `absent` |
+| 报错 | 无 | 无（没有 missing bundle / duplicate 之类） |
+
+> ⚠️ **反证：只删包、不删 bundles 条目会硬失败**（实测）：
+> `Error: dsh: cannot resolve profile bundle "dsh-cost-balance-indicator" from the dsh installation or …`，
+> 启动直接退出、拿不到 URL。所以管理器卸载后**请确认** `package.json` 的
+> `dsh.profile.bundles` 和 `dependencies` 里都没有它。
+
+### 方式二：`install.ps1` 装的 → 用 `-Uninstall`
+
+```powershell
+pwsh -File install.ps1 -Profile desktop -Uninstall
+# 只有 Windows PowerShell 5.1 的机器把 pwsh 换成 powershell 一样跑（脚本 ASCII-only，两个宿主都支持）
+```
+
+它删掉 patch 层里的 `- insert: - id: cost-balance-indicator` 行与 `node_modules` 副本，
+并**保留** `<profile>\.cost-balance-backup\` 备份。实测卸载后：
+
+- `cordis.patch.yml` 仍是**合法 YAML**（`yaml` 解析通过，条目只剩 `ui-settings-account / ui-chat / ui-settings / insert`），
+  `--dump-config` 退出码 0、153 行、**0 处**提到本插件；
+- `package.json` 仍是**合法 JSON**（`dsh.profile.bundles` = `@deepseek-ai/dsh-base, @deepseek-ai/dsh-web-app`）；
+- 重新启动：日志 1 行、余额路由 404、启动图全 `absent`，与方式一结果一致。
+
+> 注意：`-Uninstall` 只认 patch 层里的 `- insert:` 行。若本插件是**管理器方式**装的
+> （名字在 `dsh.profile.bundles` 里），它会打印
+> `WARNING: this profile still lists 'dsh-cost-balance-indicator' under dsh.profile.bundles.`，
+> 提示你去 `package.json` 删那一行——**不删就会撞上上面那条硬失败**。
+
+### ⚠️ 唯一会「装回来却什么都不出现」的残留：`disabled: true`
+
+应用启动失败时会弹「禁用第三方插件」，它往 profile patch 写入（自检第 6 节盯的就是这个指纹）：
+
+```yaml
+- id: cost-balance-indicator
+  disabled: true
+```
+
+- **管理器方式**下这条覆盖行会命中 bundle 插入的那一行（profile 层在 bundle 层之后应用），
+  于是 `--dump-config` 里的组合行是 `disabled: true`：包在、bundles 在、启动日志**一行、无报错**，
+  但余额路由 404、启动图没有它、设置命名空间也不存在——"装了却什么都没有"。
+  实测复现：`package.json` 有 bundles 条目 + patch 里留这条覆盖行 → 组合结果 `disabled: true`，
+  启动日志仍是干净的一行（这就是它难查的原因）。
+- **`install.ps1` 方式**下 `-Uninstall` 不会清掉这条覆盖行（它只在有 `- insert:` 行时才动手），
+  但重新安装时新行插在覆盖行**之后**，所以覆盖行打空、只多出一条
+  `patch: entry "cost-balance-indicator" not found` 警告，插件仍可用。
+- **最小修复**：把上面那两行从 `<profile>\cordis.patch.yml` 删掉（就两行），重启/热重载即恢复；
+  删掉后 `--dump-config` 的组合行不再带 `disabled: true`。
+
+### 卸载后还剩什么（全部无害，逐条实测）
+
+| 残留 | 位置 | 判定 |
+| --- | --- | --- |
+| 备份目录 | `<profile>\.cost-balance-backup\`（patch 层、`package.json`、旧 `lib` 快照） | 无害：没有任何代码读它；要彻底干净可整个删掉 |
+| 插件管理器的操作日志 | `<profile>\.plugin-manager\logs\operation-*\pnpm.log` | 无害：纯日志 |
+| 旧备份文件 | `<profile>\cordis.patch.yml.bak-*`、`package.json.bak-*`、`pnpm-*-*.bak-*` | 无害：不在加载路径上（其中旧 patch 备份里可能还写着本插件的 insert 行） |
+| 包管理器账本 | `<profile>\pnpm-lock.yaml`、`node_modules\.modules.yaml`、`.package-lock.json`、`.pnpm\lock.yaml`、`.pnpm-workspace-state-v1.json` | 无害：只是"曾经装过"的记录，卸载后启动实测干净（下次 `pnpm install` 自然收敛） |
+| 版本白名单 | `<profile>\pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude` 里的 `dsh-cost-balance-indicator@x.y.z` | 无害：只是允许立即安装的版本清单 |
+| 设置文档里的配色 | 设置文档里的 `cost-balance-indicator: pillColors:` 段（CLI/探针写 `~/.dsh/settings.yaml`；桌面端的文档由应用自己管理，本机现存的是 `settings.yaml.imported` 旧副本，另有 Electron Local Storage 里的 `dsh-cost-balance-indicator.pillColors` 副本） | 无害，**但会被重新安装沿用**（见下） |
+| 别的插件里的一句注释 | `node_modules\dsh-completion-alert\lib\client.js` 里 `see dsh-cost-balance-indicator for the same shape` | 无害：第三方包的注释，与卸载无关 |
+
+**设置文档里的旧配色不会影响启动，也不会自己消失**：实测在设置文档里留着
+`cost-balance-indicator: pillColors:`（正是本机 `settings.yaml.imported` 里那套 `#C6D0F5` 深色），
+插件已卸载时启动照样只有 1 行日志、`settings/describe` 里本插件命名空间**不存在**（15 个命名空间，没有它）。
+一次运行期配色写入会把这段写回文档（实测由 `#C6D0F5` 改成 `#FF0000`），说明这里就是配色的落盘位置；
+重新安装后本插件还是同一个命名空间，所以**旧的深色配色会被直接沿用**（浏览器里那份本地副本也在）。
+想要真正从零开始：删掉设置文档里的 `cost-balance-indicator:` 段，并清一次浏览器/应用的站点数据。
+
+### 想再装回来
+
+- 管理器方式：插件页里重新填 `dsh-cost-balance-indicator`（或 GitHub 地址 / 本地目录，见上文表格）；
+- 手工方式：`pwsh -File install.ps1 -Profile desktop`（已设 `patchReload: live`，之后改 patch 不用重启）；
+- 装之前先确认上面那条 `disabled: true` 覆盖行已经删掉，否则装完什么都不出现。
+
 ## 合并来源
 
 | 合并来源 | 版本 | 贡献 |

@@ -185,6 +185,15 @@ if ($Uninstall) {
     Write-PatchLines (Remove-Row $lines $legacyPeak)
     Write-Host "phase 2/2: re-enabled $legacyPeak"
   }
+  # A stale `- id: <row>` + `disabled: true` override is the app's "disable
+  # third-party plugins" fingerprint. It outlives removal and would silently
+  # disable a later re-install, so clear it on both paths.
+  $raw = [System.IO.File]::ReadAllText($patchPath)
+  $pattern = "(?m)^- id: " + [regex]::Escape($rowId) + "\r?\n\s+disabled:\s*true\s*\r?\n?"
+  if ($raw -match $pattern) {
+    [System.IO.File]::WriteAllText($patchPath, [regex]::Replace($raw, $pattern, ""), (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "cleared the stale 'disabled: true' override for $rowId"
+  }
   if (Test-Path $installDir) {
     Remove-Item -Recurse -Force $installDir
     Write-Host "removed $installDir"
@@ -219,6 +228,15 @@ $needsInsert = (-not $bundled) -and ((Find-InsertStart $lines $rowId) -lt 0)
 $balancePresent = (Find-RowLine $lines $legacyBalance) -ge 0
 $peakInstalled = Test-Path (Join-Path (Join-Path $profileDir 'node_modules') $legacyPeak)
 $needsPeakDisable = $peakInstalled -and (-not (Test-PeakDisabled $lines))
+  # A stale `- id: <row>` + `disabled: true` override is the app's "disable
+  # third-party plugins" fingerprint. It outlives removal and would silently
+  # disable a later re-install, so clear it on both paths.
+  $raw = [System.IO.File]::ReadAllText($patchPath)
+  $pattern = "(?m)^- id: " + [regex]::Escape($rowId) + "\r?\n\s+disabled:\s*true\s*\r?\n?"
+  if ($raw -match $pattern) {
+    [System.IO.File]::WriteAllText($patchPath, [regex]::Replace($raw, $pattern, ""), (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "cleared the stale 'disabled: true' override for $rowId"
+  }
 
 if ($bundled) {
   if ((Find-InsertStart $lines $rowId) -ge 0) {
